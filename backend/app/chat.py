@@ -8,21 +8,28 @@ from openai import AsyncOpenAI
 
 from .config import settings
 from .gating import GateResult, gate_answer
+from .memory import format_memory_block
 from .verification import call_lean, call_sage
 
 
-SYSTEM_PROMPT = """你是一位严谨的数论教师和研究助手。
-先使用检索资料建立定义和论证，再独立检查变量域、定理条件、边界情况与反例。
-涉及具体整数计算时应调用 SageMath；用户要求形式化证明，或关键结论适合形式化时，应调用 Lean。
-Lean 通过只证明提交的形式命题正确；你仍须确认该形式命题准确表达了用户的问题。
-工具失败或资料不足时明确说明不确定性，绝不把模型推测描述成已验证事实。
-默认不输出书名、PDF 页码或内部检索过程。使用清晰中文和 LaTeX（行内 $...$，独立公式 $$...$$）。"""
+SYSTEM_PROMPT = """You are a rigorous number-theory teacher and research assistant.
+Ground definitions and arguments in retrieved material first, then independently check domains, theorem hypotheses, edge cases, and counterexamples.
+Call SageMath for concrete integer computation; call Lean when the user asks for a formal proof or when a key claim is suitable for formalization.
+A Lean success only verifies the submitted formal statement; you must still confirm that statement faithfully captures the user's question.
+If tools fail or evidence is insufficient, state uncertainty clearly and never present model speculation as verified fact.
+Do not mention book titles, PDF page numbers, or internal retrieval steps by default. Use clear English and LaTeX (inline $...$, display $$...$$ on their own lines). Never use \\[...\\] or \\(...\\) delimiters.
+LaTeX notation rules:
+- Congruences: write $x \\equiv a \\pmod{n}$, never $x \\equiv a | (\\mathrm{mod}\\, n)$ or a bare vertical bar before (mod ...).
+- Products/juxtaposition: write $11k$ or $11k$, never $11|k$ unless you mean “11 divides k”.
+- Use `|` or $\\mid$ only for the divides relation (e.g. $d\\mid n$), not for spacing, punctuation, or modular notation.
+- Prefer $\\pmod{n}$ for congruences; use $d\\mid n$ only when stating divisibility.
+If long-term user information is provided, use it naturally without reciting the whole memory list."""
 
 TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "name": "sage_calculate",
-        "description": "用 SageMath 做精确整数运算。仅支持 gcd、xgcd、factor、is_prime、inverse_mod、crt。",
+        "description": "Exact integer computation via SageMath. Supports only gcd, xgcd, factor, is_prime, inverse_mod, crt.",
         "strict": True,
         "parameters": {
             "type": "object",
@@ -34,7 +41,7 @@ TOOLS: list[dict[str, Any]] = [
                 "arguments": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "十进制整数；crt 使用 residues 后接 moduli，并用 split 指定分界。",
+                    "description": "Decimal integers; for crt pass residues then moduli, using split as the boundary.",
                 },
                 "split": {"type": ["integer", "null"]},
             },
@@ -45,14 +52,14 @@ TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "name": "lean_verify",
-        "description": "用 Lean 4 + mathlib 编译一段完整证明。禁止 sorry、admit 和新增公理。",
+        "description": "Compile a complete Lean 4 + mathlib proof. No sorry, admit, or new axioms.",
         "strict": True,
         "parameters": {
             "type": "object",
             "properties": {
                 "code": {
                     "type": "string",
-                    "description": "以 import Mathlib 开头、包含 theorem/example 及完整证明的 Lean 4 代码。",
+                    "description": "Lean 4 code starting with import Mathlib and including a theorem/example with a full proof.",
                 }
             },
             "required": ["code"],
@@ -64,15 +71,18 @@ TOOLS: list[dict[str, Any]] = [
 
 def retrieval_answer(hits: list[dict]) -> str:
     if not hits:
-        return "当前已入库资料中没有找到足够相关的内容，暂时无法确认。"
+        return "Not enough relevant material was found in the indexed library to confirm an answer."
     excerpts = []
     for hit in hits[:3]:
         label = hit["heading"] or hit["block_type"]
         content = hit["content"]
         if len(content) > 700:
             content = content[:700].rstrip() + "…"
-        excerpts.append(f"【{label}】\n{content}")
-    return "尚未配置 OPENAI_API_KEY。以下是已入库内容的检索结果：\n\n" + "\n\n".join(excerpts)
+        excerpts.append(f"[{label}]\n{content}")
+    return (
+        "OPENAI_API_KEY is not configured. Here are retrieval excerpts from the indexed library:\n\n"
+        + "\n\n".join(excerpts)
+    )
 
 
 async def _execute_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -83,9 +93,9 @@ async def _execute_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if name == "lean_verify":
             result = await call_lean(arguments)
             return {"tool": name, **arguments, **result}
-        return {"tool": name, "ok": False, "error": f"未知工具：{name}"}
+        return {"tool": name, "ok": False, "error": f"Unknown tool: {name}"}
     except (httpx.HTTPError, ValueError) as exc:
-        return {"tool": name, "ok": False, "error": f"验证服务调用失败：{exc}"}
+        return {"tool": name, "ok": False, "error": f"Verifier call failed: {exc}"}
 
 
 def _legacy_verification(level: str) -> str:
@@ -100,24 +110,55 @@ def _legacy_verification(level: str) -> str:
     return mapping.get(level, "model_unverified")
 
 
-async def answer(message: str, hits: list[dict]) -> tuple[str, str, GateResult, list[dict[str, Any]]]:
+def suggest_title(message: str) -> str:
+    cleaned = " ".join(message.strip().split())
+    if len(cleaned) <= 24:
+        return cleaned or "New chat"
+    return cleaned[:24].rstrip() + "…"
+
+
+async def answer(
+    message: str,
+    hits: list[dict],
+    *,
+    history: list[dict[str, str]] | None = None,
+    memories: list[str] | None = None,
+) -> tuple[str, str, GateResult, list[dict[str, Any]]]:
     if not settings.openai_api_key:
         gate = GateResult(
             level="retrieval_only",
-            label="仅资料检索，未生成证明",
-            notes=["未配置模型密钥，仅返回资料检索结果。"],
+            label="Retrieval only · no proof generated",
+            notes=["No model API key configured; returning retrieval results only."],
         )
         return retrieval_answer(hits), "retrieval", gate, []
 
     context = "\n\n---\n\n".join(hit["content"] for hit in hits)
+    instructions = SYSTEM_PROMPT + format_memory_block(memories or [])
     client = AsyncOpenAI(
         api_key=settings.openai_api_key,
         base_url=settings.openai_base_url,
     )
+
+    input_items: list[dict[str, Any]] = []
+    for turn in history or []:
+        role = turn.get("role")
+        content = turn.get("content", "").strip()
+        if role in {"user", "assistant"} and content:
+            input_items.append({"role": role, "content": content})
+    input_items.append(
+        {
+            "role": "user",
+            "content": (
+                f"Question: {message}\n\nRetrieved material:\n"
+                f"{context or 'No relevant material was retrieved.'}"
+            ),
+        }
+    )
+
     response = await client.responses.create(
         model=settings.openai_model,
-        instructions=SYSTEM_PROMPT,
-        input=f"问题：{message}\n\n已检索资料：\n{context or '没有检索到相关资料。'}",
+        instructions=instructions,
+        input=input_items,
         tools=TOOLS,
     )
 
@@ -143,7 +184,7 @@ async def answer(message: str, hits: list[dict]) -> tuple[str, str, GateResult, 
             )
         response = await client.responses.create(
             model=settings.openai_model,
-            instructions=SYSTEM_PROMPT,
+            instructions=instructions,
             previous_response_id=response.id,
             input=outputs,
             tools=TOOLS,

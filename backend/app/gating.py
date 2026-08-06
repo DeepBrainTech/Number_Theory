@@ -11,12 +11,12 @@ from .config import settings
 
 
 LEVEL_LABELS = {
-    "retrieval_only": "仅资料检索，未生成证明",
-    "V0": "V0 · 仅模型生成，未验证",
-    "V1": "V1 · 自然语言推导通过前提与一致性检查",
-    "V2": "V2 · SageMath 精确计算已复核",
-    "V3": "V3 · 批判检查通过的高可信自然语言证明",
-    "V4": "V4 · Lean 形式命题已通过 kernel 检查",
+    "retrieval_only": "Retrieval only · no proof generated",
+    "V0": "V0 · model-generated, unverified",
+    "V1": "V1 · natural-language reasoning passed premise checks",
+    "V2": "V2 · SageMath exact computation verified",
+    "V3": "V3 · high-confidence natural-language proof after critique",
+    "V4": "V4 · Lean formal statement passed the kernel",
 }
 
 
@@ -42,7 +42,6 @@ def _tool_successes(tool_results: list[dict[str, Any]]) -> dict[str, list[dict[s
 def _extract_lean_code(tool_results: list[dict[str, Any]]) -> str | None:
     for item in tool_results:
         if item.get("tool") == "lean_verify" and item.get("ok"):
-            # Prefer the code echoed by the tool call payload if present.
             code = item.get("code")
             if isinstance(code, str) and code.strip():
                 return code
@@ -58,9 +57,13 @@ def _heuristic_premise_flags(message: str, answer: str) -> list[str]:
     )
     conditioned = ("假设" in answer) or ("条件" in answer) or ("assume" in lowered)
     if absolute and not conditioned:
-        notes.append("回答含全称断言，但未见显式条件说明，已降级审慎处理。")
+        notes.append(
+            "Answer contains a universal claim without explicit conditions; treated cautiously."
+        )
     if re.search(r"\b\d{2,}\b", message) and not re.search(r"\b\d+\b", answer):
-        notes.append("问题含具体数值，回答未回显关键数值，请人工核对。")
+        notes.append(
+            "Question includes concrete numbers that were not echoed in the answer; please verify."
+        )
     return notes
 
 
@@ -83,10 +86,12 @@ async def _structured_audit(
     response = await client.responses.create(
         model=settings.openai_model,
         instructions=(
-            "你是数论回答的正确性门控审计器。只输出 JSON，不要 Markdown。"
-            "检查：1) 前提、变量域、适用条件是否完整；2) 回答是否与工具结果冲突；"
-            "3) 若提供了 Lean 代码，判断其 formal statement 是否准确表达用户原问题。"
-            "JSON 字段："
+            "You are a correctness gate for number-theory answers. Output JSON only, no Markdown. "
+            "Check: 1) premises, domains, and applicability conditions; "
+            "2) conflicts with tool results; "
+            "3) if Lean code is provided, whether its formal statement matches the user's question. "
+            "Write notes and summary in English. "
+            "JSON fields: "
             '{"premise_ok":bool,"conflict":bool,"lean_aligned":bool|null,'
             '"notes":[string],"summary":string}'
         ),
@@ -115,44 +120,55 @@ def _assign_level(
 
     if conflict:
         blocked = True
-        notes.append("检测到回答与验证工具结果冲突，已阻止宣称已验证结论。")
+        notes.append(
+            "Answer conflicts with verifier tool results; blocked from claiming verified conclusions."
+        )
         return "V0", notes, blocked
 
     if lean_ok:
         if lean_aligned is True:
-            notes.append("Lean kernel 通过，且形式命题与用户问题对齐。")
+            notes.append("Lean kernel passed and the formal statement matches the question.")
             return "V4", notes, blocked
         if lean_aligned is False:
-            notes.append("Lean 编译通过，但形式命题可能未准确表达原问题，不能记为 V4。")
+            notes.append(
+                "Lean compiled, but the formal statement may not match the original question; not V4."
+            )
             if premise_ok:
-                notes.append("已降级为通过前提检查的自然语言结论。")
+                notes.append(
+                    "Downgraded to a natural-language conclusion that passed premise checks."
+                )
                 return "V1", notes, blocked
-            notes.append("题意未对齐且前提检查未通过。")
+            notes.append("Statement mismatch and premise checks failed.")
             return "V0", notes, blocked
-        notes.append("Lean 编译通过，但未能完成题意对齐检查，不能记为 V4。")
+        notes.append("Lean compiled, but statement alignment could not be checked; not V4.")
         if sage_ok:
-            notes.append("同时存在 Sage 验算结果，按计算验证计。")
+            notes.append("Sage computation also succeeded; counted as computation-verified.")
             return "V2", notes, blocked
         if premise_ok:
             return "V1", notes, blocked
         return "V0", notes, blocked
 
     if critic_ok and premise_ok and not sage_ok:
-        notes.append("前提审计与批判检查均通过；仍非形式证明。")
+        notes.append("Premise audit and critique passed; still not a formal proof.")
         return "V3", notes, blocked
 
     if sage_ok:
-        notes.append("具体计算已由 SageMath 精确复核；一般性证明未因此自动成立。")
+        notes.append(
+            "Concrete computation verified exactly by SageMath; "
+            "a general proof does not follow automatically."
+        )
         if premise_ok:
             return "V2", notes, blocked
-        notes.append("计算通过，但自然语言前提检查未完全通过。")
+        notes.append("Computation passed, but natural-language premise checks did not fully pass.")
         return "V2", notes, blocked
 
     if premise_ok:
-        notes.append("自然语言推导通过前提与一致性检查；尚未形式化。")
+        notes.append(
+            "Natural-language reasoning passed premise and consistency checks; not yet formalized."
+        )
         return "V1", notes, blocked
 
-    notes.append("仅模型生成，关键结论应视为未验证草稿。")
+    notes.append("Model-generated only; treat related claims as an unverified draft.")
     return "V0", notes, blocked
 
 
@@ -167,7 +183,7 @@ async def gate_answer(
         return GateResult(
             level="retrieval_only",
             label=LEVEL_LABELS["retrieval_only"],
-            notes=["未配置模型密钥，仅返回资料检索结果。"],
+            notes=["No model API key configured; returning retrieval results only."],
         )
 
     successes = _tool_successes(tool_results)
@@ -189,7 +205,6 @@ async def gate_answer(
             aligned = audit.get("lean_aligned")
             lean_aligned = None if aligned is None else bool(aligned)
         critic_ok = premise_ok and not conflict and bool(audit.get("notes") is not None)
-        # Treat a clean premise audit without conflict as critic pass for V3 when no tools.
         if premise_ok and not conflict and not sage_ok and not lean_ok:
             critic_ok = True
         for note in audit.get("notes") or []:
@@ -199,7 +214,7 @@ async def gate_answer(
         if isinstance(summary, str) and summary.strip():
             notes.append(summary.strip())
     except Exception as exc:  # noqa: BLE001 - gating must degrade safely
-        notes.append(f"自动审计失败，已降级为启发式检查：{exc}")
+        notes.append(f"Automatic audit failed; fell back to heuristics: {exc}")
         heuristic = _heuristic_premise_flags(message, answer)
         notes.extend(heuristic)
         premise_ok = not heuristic
@@ -220,12 +235,12 @@ async def gate_answer(
     prefix = ""
     if blocked:
         prefix = (
-            "【正确性门控】回答与验证工具冲突，以下内容不应视为已验证结论。\n\n"
+            "[Correctness gate] Answer conflicts with verifier tools; "
+            "do not treat the content below as verified.\n\n"
         )
     elif level == "V0":
-        prefix = "【正确性门控】当前等级 V0：未验证草稿。\n\n"
+        prefix = "[Correctness gate] Level V0: unverified draft.\n\n"
 
-    # Deduplicate notes while preserving order.
     unique_notes = list(dict.fromkeys(notes))
     return GateResult(
         level=level,

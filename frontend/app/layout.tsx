@@ -3,13 +3,13 @@ import "katex/dist/katex.min.css";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "数论 Agent",
-  description: "正确性优先的数论学习与研究助手",
+  title: "Number Theory Agent",
+  description: "A correctness-first assistant for learning and researching number theory",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="zh-CN">
+    <html lang="en">
       <body>{children}</body>
     </html>
   );
