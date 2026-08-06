@@ -19,10 +19,11 @@ class Settings:
     )
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     openai_model: str = os.getenv("OPENAI_MODEL", "gpt-5.6-sol")
+    openai_embedding_model: str = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
     openai_base_url: str | None = os.getenv("OPENAI_BASE_URL") or None
     sage_url: str = os.getenv("SAGE_URL", "http://localhost:8011").rstrip("/")
     lean_url: str = os.getenv("LEAN_URL", "http://localhost:8012").rstrip("/")
-    verifier_timeout: float = float(os.getenv("VERIFIER_TIMEOUT", "25"))
+    verifier_timeout: float = float(os.getenv("VERIFIER_TIMEOUT", "70"))
 
 
 settings = Settings()

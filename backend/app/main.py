@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .chat import answer
+from .chat import _legacy_verification, answer
 from .config import settings
 from .db import connection, initialize_database
 from .retrieval import search
@@ -29,7 +29,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Number Theory Agent API",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 app.add_middleware(
@@ -56,7 +56,8 @@ def library_stats() -> LibraryStats:
             SELECT COUNT(DISTINCT d.id) AS documents,
                    COUNT(c.id) AS chunks,
                    MIN(d.page_start) AS page_start,
-                   MAX(d.page_end) AS page_end
+                   MAX(d.page_end) AS page_end,
+                   MAX(d.embedding_model) AS embedding_model
             FROM documents d
             LEFT JOIN chunks c ON c.document_id = d.id
             """
@@ -70,6 +71,7 @@ def library_stats() -> LibraryStats:
         page_start=totals["page_start"],
         page_end=totals["page_end"],
         block_types={row["block_type"]: row["count"] for row in rows},
+        embedding_model=totals["embedding_model"],
     )
 
 
@@ -81,11 +83,16 @@ def search_api(request: SearchRequest) -> list[SearchHit]:
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat_api(request: ChatRequest) -> ChatResponse:
     hits = search(request.message, request.limit)
-    content, mode, verification, tool_results = await answer(request.message, hits)
+    content, mode, gate, tool_results = await answer(request.message, hits)
     return ChatResponse(
         answer=content,
         mode=mode,
-        verification=verification,
+        verification=_legacy_verification(gate.level),
+        verification_level=gate.level,
+        verification_label=gate.label,
+        verification_notes=gate.notes,
+        lean_aligned=gate.lean_aligned,
+        premise_ok=gate.premise_ok,
         retrieved_chunks=len(hits),
         tool_results=tool_results,
     )
@@ -93,7 +100,13 @@ async def chat_api(request: ChatRequest) -> ChatResponse:
 
 @app.get("/api/tools/status")
 async def tools_status() -> dict:
-    return await verifier_status()
+    status = await verifier_status()
+    status["embedding"] = {
+        "model": settings.openai_embedding_model,
+        "configured": bool(settings.openai_api_key),
+        "dimensions": 1536,
+    }
+    return status
 
 
 @app.post("/api/tools/sage")

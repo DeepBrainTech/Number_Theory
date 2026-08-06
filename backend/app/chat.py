@@ -7,6 +7,7 @@ import httpx
 from openai import AsyncOpenAI
 
 from .config import settings
+from .gating import GateResult, gate_answer
 from .verification import call_lean, call_sage
 
 
@@ -15,7 +16,7 @@ SYSTEM_PROMPT = """你是一位严谨的数论教师和研究助手。
 涉及具体整数计算时应调用 SageMath；用户要求形式化证明，或关键结论适合形式化时，应调用 Lean。
 Lean 通过只证明提交的形式命题正确；你仍须确认该形式命题准确表达了用户的问题。
 工具失败或资料不足时明确说明不确定性，绝不把模型推测描述成已验证事实。
-默认不输出书名、PDF 页码或内部检索过程。使用清晰中文和 LaTeX。"""
+默认不输出书名、PDF 页码或内部检索过程。使用清晰中文和 LaTeX（行内 $...$，独立公式 $$...$$）。"""
 
 TOOLS: list[dict[str, Any]] = [
     {
@@ -77,17 +78,36 @@ def retrieval_answer(hits: list[dict]) -> str:
 async def _execute_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     try:
         if name == "sage_calculate":
-            return await call_sage(arguments)
+            result = await call_sage(arguments)
+            return {"tool": name, **arguments, **result}
         if name == "lean_verify":
-            return await call_lean(arguments)
-        return {"ok": False, "error": f"未知工具：{name}"}
+            result = await call_lean(arguments)
+            return {"tool": name, **arguments, **result}
+        return {"tool": name, "ok": False, "error": f"未知工具：{name}"}
     except (httpx.HTTPError, ValueError) as exc:
-        return {"ok": False, "error": f"验证服务调用失败：{exc}"}
+        return {"tool": name, "ok": False, "error": f"验证服务调用失败：{exc}"}
 
 
-async def answer(message: str, hits: list[dict]) -> tuple[str, str, str, list[dict[str, Any]]]:
+def _legacy_verification(level: str) -> str:
+    mapping = {
+        "retrieval_only": "retrieval_only",
+        "V0": "model_unverified",
+        "V1": "model_unverified",
+        "V2": "sage_verified",
+        "V3": "model_unverified",
+        "V4": "lean_verified",
+    }
+    return mapping.get(level, "model_unverified")
+
+
+async def answer(message: str, hits: list[dict]) -> tuple[str, str, GateResult, list[dict[str, Any]]]:
     if not settings.openai_api_key:
-        return retrieval_answer(hits), "retrieval", "retrieval_only", []
+        gate = GateResult(
+            level="retrieval_only",
+            label="仅资料检索，未生成证明",
+            notes=["未配置模型密钥，仅返回资料检索结果。"],
+        )
+        return retrieval_answer(hits), "retrieval", gate, []
 
     context = "\n\n---\n\n".join(hit["content"] for hit in hits)
     client = AsyncOpenAI(
@@ -113,7 +133,7 @@ async def answer(message: str, hits: list[dict]) -> tuple[str, str, str, list[di
             except json.JSONDecodeError:
                 arguments = {}
             result = await _execute_tool(call.name, arguments)
-            tool_results.append({"tool": call.name, **result})
+            tool_results.append(result)
             outputs.append(
                 {
                     "type": "function_call_output",
@@ -129,11 +149,15 @@ async def answer(message: str, hits: list[dict]) -> tuple[str, str, str, list[di
             tools=TOOLS,
         )
 
-    successful = {item["tool"] for item in tool_results if item.get("ok")}
-    if "lean_verify" in successful:
-        verification = "lean_verified"
-    elif "sage_calculate" in successful:
-        verification = "sage_verified"
-    else:
-        verification = "model_unverified"
-    return response.output_text, "openai", verification, tool_results
+    content = response.output_text or ""
+    lean_code = next(
+        (
+            item.get("code")
+            for item in tool_results
+            if item.get("tool") == "lean_verify" and item.get("ok") and item.get("code")
+        ),
+        None,
+    )
+    gate = await gate_answer(message, content, tool_results, lean_code=lean_code)
+    final = f"{gate.answer_prefix}{content}" if gate.answer_prefix else content
+    return final, "openai", gate, tool_results

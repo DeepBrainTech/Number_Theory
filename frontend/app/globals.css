@@ -236,6 +236,63 @@ textarea {
   white-space: pre-wrap;
 }
 
+.mathMarkdown {
+  line-height: 1.75;
+}
+
+.mathMarkdown > :first-child {
+  margin-top: 0;
+}
+
+.mathMarkdown > :last-child {
+  margin-bottom: 0;
+}
+
+.mathMarkdown p,
+.mathMarkdown ul,
+.mathMarkdown ol {
+  margin: 0 0 0.85em;
+}
+
+.mathMarkdown ul,
+.mathMarkdown ol {
+  padding-left: 1.3em;
+}
+
+.mathMarkdown .katex-display {
+  margin: 0.9em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.mathMarkdown .inlineCode,
+.mathMarkdown .codeBlock {
+  background: #efece3;
+  border-radius: 6px;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 0.92em;
+}
+
+.mathMarkdown .inlineCode {
+  padding: 0.1em 0.35em;
+}
+
+.mathMarkdown .codeBlock {
+  margin: 0.8em 0;
+  overflow-x: auto;
+  padding: 12px 14px;
+}
+
+.statusCard .smallDd {
+  font-family: inherit;
+  font-size: 12px;
+  max-width: 150px;
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .verification {
   border-top: 1px solid var(--line);
   color: var(--muted);
@@ -245,6 +302,42 @@ textarea {
   padding-top: 10px;
 }
 
+.verification span {
+  display: block;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.verification ul {
+  margin: 8px 0 0;
+  padding-left: 16px;
+}
+
+.verification li {
+  line-height: 1.55;
+  margin-bottom: 4px;
+}
+
+.verification.v4 span {
+  color: #146c43;
+}
+
+.verification.v3 span,
+.verification.v2 span {
+  color: #1f5f4a;
+}
+
+.verification.v1 span {
+  color: #8a6a24;
+}
+
+.verification.v0 span {
+  color: #9a463c;
+}
+
+.verification.retrieval span {
+  color: var(--muted);
+}
 .thinking,
 .notice,
 .error {

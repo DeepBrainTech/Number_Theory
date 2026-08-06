@@ -130,6 +130,7 @@ Content-Type: application/json
 ```dotenv
 OPENAI_API_KEY=sk-...
 OPENAI_MODEL=gpt-5.6-sol
+OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 ```
 
 配置模型后重新创建服务：
@@ -138,7 +139,7 @@ OPENAI_MODEL=gpt-5.6-sol
 docker compose up -d --build
 ```
 
-回答会标记为 `model_unverified`、`sage_verified` 或 `lean_verified`。后两者只说明相应计算或提交给 Lean 的形式命题已通过；自然语言题意到形式命题的翻译仍需审查，不能把标签理解为整段回答绝对正确。
+回答会标记正确性等级 `V0`–`V4`（并保留兼容字段 `model_unverified` / `sage_verified` / `lean_verified`）。`V2`/`V4` 只说明相应计算或提交给 Lean 且题意对齐的形式命题已通过；不能把标签理解为整段回答绝对正确。向量检索使用 `text-embedding-3-small`；更换 embedding 后需重新入库。
 
 可直接测试工具：
 
@@ -172,6 +173,6 @@ pnpm build
 ## 数据与正确性说明
 
 - 页面范围和原始页码在后台保存，但前端默认不显示教材引用。
-- 首版向量是零配置的可复现词法投影 `local-hash-v1`，并与 PostgreSQL 全文检索做融合；它不是高质量语义 embedding。
+- 向量检索使用 OpenAI `text-embedding-3-small`（1536 维），并与 PostgreSQL 全文检索做 RRF 融合；更换 embedding 后需重新入库。
 - 中英文基础数论术语通过受控词表扩展，因此首章的中文查询可以检索英文教材。
-- Sage/Lean 显著提高可验证问题的可靠性，但并非所有数论研究问题都可自动形式化；工具失败或覆盖不到的结论必须保持未验证标记。
+- 回答经 V0–V4 正确性门控；Sage/Lean 成功不等于整段自然语言已验证，Lean 还需题意对齐。

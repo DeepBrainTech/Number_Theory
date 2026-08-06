@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .db import connection, initialize_database
-from .embedding import MODEL_NAME, as_pgvector, embed
+from .embedding import MODEL_NAME, as_pgvector, embed_texts
 
 
 DEFAULT_FILENAME = "1017984325-Introduction-to-Number-Theory-2026 (1).pdf"
@@ -144,6 +144,9 @@ def ingest(pdf_path: Path, start_page: int, end_page: int) -> tuple[str, int]:
         raise RuntimeError("No chunks were extracted")
 
     initialize_database()
+    texts = [" ".join(filter(None, [chunk.heading, chunk.content])) for chunk in chunks]
+    vectors = [as_pgvector(values) for values in embed_texts(texts)]
+
     with connection() as conn:
         conn.execute("DELETE FROM documents WHERE id = %s", (document_id,))
         conn.execute(
@@ -163,8 +166,7 @@ def ingest(pdf_path: Path, start_page: int, end_page: int) -> tuple[str, int]:
                 MODEL_NAME,
             ),
         )
-        for chunk in chunks:
-            vector = as_pgvector(embed(" ".join(filter(None, [chunk.heading, chunk.content]))))
+        for chunk, vector in zip(chunks, vectors, strict=True):
             conn.execute(
                 """
                 INSERT INTO chunks

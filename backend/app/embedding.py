@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-import hashlib
-import math
 import re
 
+from openai import OpenAI
 
-DIMENSIONS = 384
-MODEL_NAME = "local-hash-v1"
+from .config import settings
+
+
+DIMENSIONS = 1536
+MODEL_NAME = "text-embedding-3-small"
+BATCH_SIZE = 64
 
 GLOSSARY = {
     "整除": "divisibility divides factor multiple",
@@ -43,22 +46,37 @@ def lexical_query(text: str) -> str:
     return " OR ".join(unique_tokens)
 
 
-def embed(text: str) -> list[float]:
-    """Create a deterministic lexical projection for a zero-config MVP.
+def _client() -> OpenAI:
+    if not settings.openai_api_key:
+        raise RuntimeError("OPENAI_API_KEY is required for real embeddings")
+    return OpenAI(
+        api_key=settings.openai_api_key,
+        base_url=settings.openai_base_url,
+    )
 
-    This is deliberately labelled as a local retrieval vector, not a semantic
-    embedding model. It can be replaced without changing the database API.
-    """
-    values = [0.0] * DIMENSIONS
-    for token in _tokens(text):
-        digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
-        bucket = int.from_bytes(digest[:4], "big") % DIMENSIONS
-        sign = 1.0 if digest[4] & 1 else -1.0
-        values[bucket] += sign
-    norm = math.sqrt(sum(value * value for value in values))
-    if norm:
-        values = [value / norm for value in values]
-    return values
+
+def embed_texts(texts: list[str]) -> list[list[float]]:
+    """Embed texts with OpenAI text-embedding-3-small."""
+    if not texts:
+        return []
+    client = _client()
+    vectors: list[list[float]] = []
+    for start in range(0, len(texts), BATCH_SIZE):
+        batch = [expand_query(text)[:8000] for text in texts[start : start + BATCH_SIZE]]
+        response = client.embeddings.create(
+            model=settings.openai_embedding_model,
+            input=batch,
+            dimensions=DIMENSIONS,
+        )
+        ordered = sorted(response.data, key=lambda item: item.index)
+        vectors.extend(item.embedding for item in ordered)
+    if len(vectors) != len(texts):
+        raise RuntimeError("Embedding API returned an unexpected number of vectors")
+    return vectors
+
+
+def embed(text: str) -> list[float]:
+    return embed_texts([text])[0]
 
 
 def as_pgvector(values: list[float]) -> str:

@@ -2,37 +2,43 @@ from __future__ import annotations
 
 from collections import defaultdict
 
+from .config import settings
 from .db import connection
 from .embedding import as_pgvector, embed, lexical_query
 
 
 def search(query: str, limit: int = 5) -> list[dict]:
     fts_query = lexical_query(query)
-    vector = as_pgvector(embed(query))
     candidate_limit = max(limit * 4, 20)
 
     with connection() as conn:
-        lexical = conn.execute(
-            """
-            SELECT id, block_type, heading, content, pdf_page, printed_page,
-                   ts_rank_cd(content_tsv, websearch_to_tsquery('english', %s)) AS raw_score
-            FROM chunks
-            WHERE content_tsv @@ websearch_to_tsquery('english', %s)
-            ORDER BY raw_score DESC, id
-            LIMIT %s
-            """,
-            (fts_query, fts_query, candidate_limit),
-        ).fetchall()
-        vector_hits = conn.execute(
-            """
-            SELECT id, block_type, heading, content, pdf_page, printed_page,
-                   1 - (embedding <=> %s::vector) AS raw_score
-            FROM chunks
-            ORDER BY embedding <=> %s::vector, id
-            LIMIT %s
-            """,
-            (vector, vector, candidate_limit),
-        ).fetchall()
+        lexical = []
+        if fts_query:
+            lexical = conn.execute(
+                """
+                SELECT id, block_type, heading, content, pdf_page, printed_page,
+                       ts_rank_cd(content_tsv, websearch_to_tsquery('english', %s)) AS raw_score
+                FROM chunks
+                WHERE content_tsv @@ websearch_to_tsquery('english', %s)
+                ORDER BY raw_score DESC, id
+                LIMIT %s
+                """,
+                (fts_query, fts_query, candidate_limit),
+            ).fetchall()
+
+        vector_hits = []
+        if settings.openai_api_key:
+            vector = as_pgvector(embed(query))
+            vector_hits = conn.execute(
+                """
+                SELECT id, block_type, heading, content, pdf_page, printed_page,
+                       1 - (embedding <=> %s::vector) AS raw_score
+                FROM chunks
+                ORDER BY embedding <=> %s::vector, id
+                LIMIT %s
+                """,
+                (vector, vector, candidate_limit),
+            ).fetchall()
 
     by_id: dict[int, dict] = {}
     fused: defaultdict[int, float] = defaultdict(float)

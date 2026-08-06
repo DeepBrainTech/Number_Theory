@@ -29,6 +29,11 @@ class ChatResponse(BaseModel):
     answer: str
     mode: str
     verification: str
+    verification_level: str
+    verification_label: str
+    verification_notes: list[str] = Field(default_factory=list)
+    lean_aligned: bool | None = None
+    premise_ok: bool = False
     retrieved_chunks: int
     tool_results: list[dict[str, Any]] = Field(default_factory=list)
 
@@ -49,3 +54,4 @@ class LibraryStats(BaseModel):
     page_start: int | None
     page_end: int | None
     block_types: dict[str, int]
+    embedding_model: str | None = None

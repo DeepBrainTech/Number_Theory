@@ -1,15 +1,11 @@
 import unittest
 
-from app.embedding import DIMENSIONS, embed, expand_query, lexical_query
+from app.embedding import DIMENSIONS, expand_query, lexical_query
 
 
 class EmbeddingTests(unittest.TestCase):
-    def test_embedding_is_stable_and_nonzero(self) -> None:
-        first = embed("Euclid algorithm")
-        second = embed("Euclid algorithm")
-        self.assertEqual(first, second)
-        self.assertEqual(len(first), DIMENSIONS)
-        self.assertTrue(any(value != 0 for value in first))
+    def test_dimensions_match_openai_small(self) -> None:
+        self.assertEqual(DIMENSIONS, 1536)
 
     def test_chinese_query_expansion(self) -> None:
         expanded = expand_query("如何使用欧几里得算法求最大公因数？")
