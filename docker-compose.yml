@@ -1,0 +1,105 @@
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-number_theory}
+      POSTGRES_USER: ${POSTGRES_USER:-number_theory}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-number_theory_dev}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-number_theory} -d ${POSTGRES_DB:-number_theory}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build:
+      context: ./backend
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://number_theory:number_theory_dev@db:5432/number_theory}
+      PDF_ROOT: /data/pdf
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.6-sol}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      SAGE_URL: http://sage:8011
+      LEAN_URL: http://lean:8012
+      VERIFIER_TIMEOUT: ${VERIFIER_TIMEOUT:-70}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./pdf:/data/pdf:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      sage:
+        condition: service_healthy
+      lean:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  sage:
+    build:
+      context: ./services/sage
+    ports:
+      - "8011:8011"
+    environment:
+      DOT_SAGE: /tmp/.sage
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 2g
+    cpus: 2
+    healthcheck:
+      test: ["CMD", "sage", "-python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8011/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  lean:
+    build:
+      context: ./services/lean
+    ports:
+      - "8012:8012"
+    environment:
+      LEAN_TIMEOUT: ${LEAN_TIMEOUT:-60}
+    volumes:
+      - ./services/lean/server.py:/app/server.py:ro
+      - ./services/lean/smoke.lean:/app/smoke.lean:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 2g
+    cpus: 2
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8012/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

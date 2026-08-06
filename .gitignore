@@ -1,0 +1,13 @@
+pdf/
+project.md
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+node_modules/
+.next/
+*.tsbuildinfo
+data/
