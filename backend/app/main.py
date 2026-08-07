@@ -80,6 +80,18 @@ from .verification import call_lean, call_sage, verifier_status
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     initialize_database()
+    if settings.openai_api_key:
+        if settings.auto_ingest_manifest:
+            from .ingest import sync_deploy_manifest
+
+            asyncio.create_task(asyncio.to_thread(sync_deploy_manifest))
+        elif settings.ingest_if_empty:
+            with connection() as conn:
+                row = conn.execute("SELECT COUNT(*) AS count FROM chunks").fetchone()
+            if row and int(row["count"]) == 0:
+                from .ingest import ingest_all_approved
+
+                asyncio.create_task(asyncio.to_thread(ingest_all_approved))
     yield
 
 

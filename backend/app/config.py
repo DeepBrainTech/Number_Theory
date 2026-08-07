@@ -30,6 +30,13 @@ class Settings:
     rerank_llm: bool = os.getenv("RERANK_LLM", "0") == "1"
     research_tool_timeout: float = float(os.getenv("RESEARCH_TOOL_TIMEOUT", "20"))
     semantic_scholar_api_key: str = os.getenv("SEMANTIC_SCHOLAR_API_KEY", "")
+    ingest_if_empty: bool = os.getenv("INGEST_IF_EMPTY", "0") == "1"
+    auto_ingest_manifest: bool = os.getenv("AUTO_INGEST_MANIFEST", "1") == "1"
+    deploy_ingest_targets: tuple[str, ...] = tuple(
+        item.strip()
+        for item in os.getenv("DEPLOY_INGEST_TARGETS", "").split(",")
+        if item.strip()
+    )
 
 
 settings = Settings()

@@ -61,6 +61,74 @@ docker compose down
 
 `docker compose down -v` 会删除 PostgreSQL volume 和已入库数据，除非确实需要清空数据库，否则不要使用。
 
+## 同步 RAG 知识库
+
+RAG 数据（`documents` / `chunks` 表）与聊天记录在同一 PostgreSQL 里，**不会**随 Git 同步。换机器、清空 volume（`docker compose down -v`）或更换 embedding 模型后，需要重新入库。
+
+PDF 放在本地 `pdf/` 目录（已被 Git 忽略），容器内挂载为 `/data/pdf`。
+
+### 部署清单（自动检查）
+
+默认只需入库清单里的章节，**不是**全部 PDF。清单定义在：
+
+`backend/app/ingestion/manifest.py` → `DEFAULT_DEPLOY_TARGETS`
+
+当前默认包含 Hill 教材第 1～3 章。修改该列表即可增减章节；也可用环境变量覆盖：
+
+```dotenv
+DEPLOY_INGEST_TARGETS=profile:hill-ch1,profile:hill-ch4,book:cai
+```
+
+目标语法：
+
+| 写法 | 含义 |
+|------|------|
+| `profile:hill-ch1` | 单章（profile key） |
+| `book:hill` | 一本书的全部章节 |
+| `hill-ch1` | 自动识别为 profile |
+
+查看清单解析结果：
+
+```powershell
+docker compose -f docker-compose.dev.yml exec backend python -m app.ingest --list-manifest
+```
+
+**每次部署**：后端默认 `AUTO_INGEST_MANIFEST=1`，启动后后台检查清单项是否已入库（PDF 变更或 embedding 模型变更会触发重跑），只补缺失项。需配置 `OPENAI_API_KEY`。
+
+手动按清单同步：
+
+```powershell
+.\scripts\sync-rag.ps1
+```
+
+或：
+
+```powershell
+docker compose -f docker-compose.dev.yml --profile ingest run --rm ingest
+```
+
+查看当前知识库：
+
+```powershell
+Invoke-RestMethod http://localhost:8000/api/library/stats
+```
+
+关闭自动同步：`.env` 中设 `AUTO_INGEST_MANIFEST=0`。
+
+**可选**：单本书全量入库（不走清单）：
+
+```powershell
+.\scripts\sync-rag.ps1 -Book hill
+```
+
+**可选**：入库 catalog 全部书目（需 `pdf/` 下文件齐全）：
+
+```powershell
+docker compose -f docker-compose.dev.yml exec backend python -m app.ingest --all-approved
+```
+
+入库是幂等的：同一章节重复执行会替换旧数据，不会产生重复 chunk。
+
 ## 重新导入第一章
 
 确保数据库和后端已经启动，然后运行：
