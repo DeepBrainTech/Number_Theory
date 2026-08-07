@@ -489,8 +489,7 @@ export default function Home() {
           </button>
         </nav>
 
-        <section className="conversationSection sidebarChats">
-          <h2>Recent</h2>
+        <section className="sidebarChats" aria-label="Recent chats">
           <div className="conversationList">
             {conversations.length === 0 && <p className="emptyHint">No saved chats yet</p>}
             {conversations.map((item) => (

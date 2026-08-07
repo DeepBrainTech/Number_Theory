@@ -40,9 +40,11 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 0;
-  max-height: 100vh;
+  height: 100vh;
   overflow: hidden;
-  padding: 12px 8px 10px;
+  padding: 10px 6px 12px;
+  position: sticky;
+  top: 0;
   width: var(--sidebar-width);
 }
 
@@ -61,12 +63,12 @@ textarea {
   color: #e8f0eb;
   cursor: pointer;
   display: flex;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
-  gap: 8px;
+  gap: 10px;
   min-width: 0;
   overflow: hidden;
-  padding: 8px 10px;
+  padding: 9px 10px;
   text-align: left;
   text-overflow: ellipsis;
   transition: background 0.12s ease;
@@ -98,29 +100,48 @@ textarea {
 .sidebarChats {
   border-top: 1px solid rgb(255 255 255 / 12%);
   display: flex;
-  flex: 1;
+  flex: 1 1 auto;
   flex-direction: column;
   min-height: 0;
-  padding-top: 12px;
+  overflow: hidden;
+  padding-top: 10px;
 }
 
 .sidebarChats h2 {
   flex-shrink: 0;
-  font-size: 10px;
-  letter-spacing: 0.12em;
-  margin: 0 0 6px;
-  padding: 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  margin: 0 0 4px;
+  padding: 0 10px 6px;
   text-transform: uppercase;
 }
 
 .sidebarChats .conversationList {
   display: flex;
-  flex: 1;
+  flex: 1 1 auto;
   flex-direction: column;
-  gap: 6px;
+  gap: 2px;
+  max-height: none;
   min-height: 0;
+  overflow-x: hidden;
   overflow-y: auto;
-  padding: 0 4px;
+  padding: 0 4px 4px;
+  scrollbar-color: rgb(255 255 255 / 22%) transparent;
+  scrollbar-width: thin;
+}
+
+.sidebarChats .conversationList::-webkit-scrollbar {
+  width: 6px;
+}
+
+.sidebarChats .conversationList::-webkit-scrollbar-thumb {
+  background: rgb(255 255 255 / 22%);
+  border-radius: 999px;
+}
+
+.sidebarChats .conversationList::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .sidebarFooter {
@@ -191,9 +212,47 @@ textarea {
 .conversationList {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  max-height: 240px;
-  overflow-y: auto;
+  gap: 2px;
+}
+
+.sidebarChats .conversationItem {
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+}
+
+.sidebarChats .conversationItem:hover {
+  background: rgb(255 255 255 / 10%);
+}
+
+.sidebarChats .conversationItem.active {
+  background: rgb(255 255 255 / 14%);
+}
+
+.sidebarChats .conversationMain {
+  padding: 9px 10px;
+}
+
+.sidebarChats .conversationTitle {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.sidebarChats .conversationTime {
+  display: none;
+}
+
+.sidebarChats .conversationItem .iconBtn {
+  margin-right: 4px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.sidebarChats .conversationItem:hover .iconBtn,
+.sidebarChats .conversationItem:focus-within .iconBtn {
+  opacity: 1;
 }
 
 .conversationItem {
@@ -1664,13 +1723,19 @@ textarea {
   }
 
   .sidebar {
+    height: auto;
     max-height: none;
     padding: 24px;
+    position: static;
   }
 
-  .conversationList,
-  .memoryList {
-    max-height: 140px;
+  .sidebarChats {
+    max-height: 42vh;
+    min-height: 200px;
+  }
+
+  .sidebarChats .conversationList {
+    max-height: none;
   }
 
   .scope {
