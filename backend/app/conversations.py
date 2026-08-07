@@ -109,6 +109,7 @@ def add_message(
     role: str,
     content: str,
     *,
+    attachments: list[str] | None = None,
     verification_level: str | None = None,
     verification_label: str | None = None,
     verification_notes: list[str] | None = None,
@@ -118,14 +119,14 @@ def add_message(
         row = conn.execute(
             """
             INSERT INTO messages (
-                conversation_id, role, content,
+                conversation_id, role, content, attachments,
                 verification_level, verification_label, verification_notes, tool_results
             )
             VALUES (
-                %s::uuid, %s, %s, %s, %s, %s::jsonb, %s::jsonb
+                %s::uuid, %s, %s, %s::jsonb, %s, %s, %s::jsonb, %s::jsonb
             )
             RETURNING
-                id, conversation_id::text AS conversation_id, role, content,
+                id, conversation_id::text AS conversation_id, role, content, attachments,
                 verification_level, verification_label, verification_notes, tool_results,
                 created_at
             """,
@@ -133,6 +134,7 @@ def add_message(
                 conversation_id,
                 role,
                 content,
+                json.dumps(attachments or [], ensure_ascii=False),
                 verification_level,
                 verification_label,
                 json.dumps(verification_notes or [], ensure_ascii=False),
@@ -149,7 +151,7 @@ def list_messages(conversation_id: str, client_id: str) -> list[dict[str, Any]]:
         rows = conn.execute(
             """
             SELECT
-                id, conversation_id::text AS conversation_id, role, content,
+                id, conversation_id::text AS conversation_id, role, content, attachments,
                 verification_level, verification_label, verification_notes, tool_results,
                 created_at
             FROM messages
@@ -200,10 +202,14 @@ def ensure_uuid(value: str) -> str:
 def _normalize_message(row: dict[str, Any]) -> dict[str, Any]:
     notes = row.get("verification_notes")
     tools = row.get("tool_results")
+    attachments = row.get("attachments")
     if isinstance(notes, str):
         notes = json.loads(notes)
     if isinstance(tools, str):
         tools = json.loads(tools)
+    if isinstance(attachments, str):
+        attachments = json.loads(attachments)
     row["verification_notes"] = notes or []
     row["tool_results"] = tools or []
+    row["attachments"] = attachments or []
     return row

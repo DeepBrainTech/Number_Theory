@@ -1,0 +1,164 @@
+数论 Agent：正确架构 / 当前实现 / 下一步
+更新日期：2026-08-07（第四版：E2–E6 + B3 落地）
+依据：project.md、docker-compose、backend/frontend 现有代码
+
+================================================================================
+0. 一句话定位
+================================================================================
+
+目标不是“数论 RAG 聊天机器人”，而是：
+  AI Number Theorist workspace
+  —— 以 LLM 为编排层，以数学检索 + Sage/PARI 计算 + Lean 形式验证为能力核心。
+
+正确性承诺应改为：分级可信度（V0–V4）与门控；达不到门槛时诚实说不确定。
+
+
+================================================================================
+1. 正确总体结构（目标架构）
+================================================================================
+
+用户界面（Chat / Notebook）
+        |
+        v
+单一强 Agent（LLM + 受控工作流 + tool calling）
+  - 意图识别：teach / solve / research / formalize
+  - 检索规划与数学 query expansion
+  - 候选答案与证明计划
+  - 工具调用与结果回灌
+  - 批判检查与正确性门控
+        |
+        +------------------+------------------+
+        |                  |                  |
+        v                  v                  v
+ Mathematical RAG      Math Tools        Research Tools
+ 教材/讲义/定理库       SageMath           arXiv
+ 笔记/本地语料          PARI/GP            OEIS
+ 日后 papers            Lean 4+mathlib     Crossref / S2
+                        (受限 Python)      (可选 MathSciNet)
+        |                  |
+        +--------+---------+
+                 v
+        Verification Layer
+          - 前提/条件审计
+          - 数值 / 符号精确计算
+          - Lean kernel 检查
+          - NL ↔ Lean 题意对齐
+          - （研究模式）文献事实 vs 猜想分栏
+                 |
+                 v
+        带验证等级的最终回答（默认不展示教材页码引用）
+
+
+检索子流水线：
+
+  Query
+    → 数学概念扩展（规则桥接表 + LLM）
+    → Hybrid retrieval（FTS + vector + 结构化通道）
+    → RRF + block_type 加权 + 依赖边加分 + 可选 rerank
+    → relevant definition / theorem / proof / paper
+
+
+模式：
+  Teach / Solve（hint · socratic · full）
+  Research（五段分栏 + 结构校验）
+  Formalize（statement 确认 → 编译）
+
+
+================================================================================
+2. 当前已实现什么
+================================================================================
+
+状态：Phase 0–3 主体完成（含本轮 E2–E6 + B3）。
+
+【基础设施】
+  [x] Docker Compose：db / backend / frontend / sage / lean
+  [x] PostgreSQL 17 + pgvector；OCR（poppler + tesseract）
+  [x] FastAPI + Next.js；V0–V4；无 Key 退回 retrieval_only
+
+【知识库 / Ingestion】
+  [x] 语义切块 + 12 本核准书 catalog + parent_ordinal
+  [x] chunk_deps：proves / uses_definition / uses_lemma / uses_theorem
+      （结构边自动同步；LLM 抽取见 `python -m app.dependencies`）
+  [x] 检索对依赖邻居软加分
+  [ ] papers 语料 / citation graph（刻意后期）
+
+【检索】
+  [x] FTS + 向量 + RRF + block_type 加权 + 结构化通道
+  [x] 数学概念 expansion + glossary + 符号规范化 + 可选 rerank
+
+【Agent / 模式】
+  [x] Teach / Solve / Research / Auto（聊天）
+  [x] 独立 Lean 工作台（双栏）：NL+证明思路 → statement/证明草稿 →
+      可编辑 Lean + 编译结果；V4 在此产生，可 Attach 回聊天
+  [x] 聊天不再调用 lean_verify；形式化引导至 Lean tab
+  [x] 提示档位 hint / socratic / full（B3）
+  [x] Research 五段强制 + 缺段时降级为 V0（E3）
+  [~] 显式 FSM 刻意推迟
+
+【数学工具】
+  [x] Sage 白名单 19 运算，含
+      pari_bnfinit / ideal_prime_dec / pari_polgalois（E6）
+  [x] Lean 4 + mathlib
+  [ ] 通用受限 Python / SymPy（刻意不做）
+
+【研究工具】
+  [x] arXiv / OEIS / Crossref / Semantic Scholar（E5）
+  [x] literature_search 跨源 DOI/标题去重（E5）
+  [x] 可持久化 Notebook：experiment / conjecture / counterexample + JSON 导出（E4）
+
+【验证 / 门控】
+  [x] V0–V4；V3 独立批判；NL↔Lean 对齐；验证日志下载
+
+
+================================================================================
+3. 差距简表
+================================================================================
+
+模块                    目标形态                     当前状态
+----------------------------------------------------------------------
+UI                      chat + notebook              chat + 持久化 Notebook
+编排                    单 Agent + 受控 FSM          单 Agent + tool loop
+RAG                     结构感知 + 依赖图            依赖边已入库并可加分
+Tools                   Sage/PARI/OEIS/Lean          19 运算 + 文献四源
+Modes                   四模式 + 提示档位            已全部具备
+Research retrieval      论文与序列                   arXiv/OEIS/Crossref/S2
+Notebook                实验/猜想持久化              已实现
+
+
+================================================================================
+4. 刻意不做 / 真正的下一步
+================================================================================
+
+刻意不做：
+  - 不拆多 Agent；不微调；不做无沙箱任意代码
+  - 不宣称 Lean 验证了整段自然语言
+  - citation graph 等 papers 语料
+  - MathSciNet（许可/接口门槛）
+
+下一步：
+  1) 对被跳过扫描书做 OCR 质量核对后解禁入库
+  2) 对已入库文档跑 `python -m app.dependencies` 批量抽依赖边
+  3) 积累初等数论 Lean 样例
+  4) 真实使用中收紧 Research 分栏的内容级校验（不仅标题）
+
+
+================================================================================
+5. 仓库对应关系
+================================================================================
+
+  frontend/                    Chat | Lean 工作台 + Notebook
+  frontend/app/components/LeanWorkbench.tsx  双栏形式化 UI
+  backend/app/main.py          API（含 formalize/*、attach-verification、notebook）
+  backend/app/chat.py          Agent + Sage/文献 tools（无 lean_verify）
+  backend/app/modes.py         模式、提示档位、Research 结构校验
+  backend/app/formalize.py     statement / proof draft / verify + 对齐
+  backend/app/research.py      arXiv / OEIS / Crossref / S2 + 去重
+  backend/app/retrieval.py     混合检索 + 依赖加分
+  backend/app/expansion.py     数学概念扩展
+  backend/app/dependencies.py  依赖边抽取
+  backend/app/notebook.py      实验 notebook 持久化
+  backend/app/gating.py        V0–V4
+  services/sage/               19 个白名单运算（含数域）
+  services/lean/               Lean 验证
+  docker-compose.yml           编排
+  project.md                   原方案；本文件为落地对照

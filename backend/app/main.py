@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from typing import Any
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
-from .chat import _legacy_verification, answer, suggest_title
+from .chat import StatusEmitter, _legacy_verification, answer, suggest_title, validate_images
 from .config import settings
+from .formalize import generate_proof_draft, propose_statement, verify_statement
+from .latex_ocr import image_to_latex
 from .conversations import (
     add_message,
     create_conversation,
@@ -28,6 +35,7 @@ from .memory import (
     list_memories,
     memory_texts,
 )
+from .notebook import create_entry, delete_entry, export_notebook, list_entries
 from .retrieval import search
 from .schemas import (
     ChatRequest,
@@ -35,14 +43,25 @@ from .schemas import (
     ConversationCreate,
     ConversationOut,
     ConversationRename,
+    AttachVerificationRequest,
+    FormalizeProofRequest,
+    FormalizeProofResponse,
+    FormalizeStatementRequest,
+    FormalizeStatementResponse,
+    FormalizeVerifyRequest,
+    FormalizeVerifyResponse,
     LibraryStats,
     MemoryCreate,
     MemoryOut,
     MessageOut,
+    NotebookCreate,
+    NotebookEntryOut,
     SearchHit,
     SearchRequest,
     SageRequest,
     LeanRequest,
+    LatexFromImageRequest,
+    LatexFromImageResponse,
 )
 from .verification import call_lean, call_sage, verifier_status
 
@@ -55,7 +74,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Number Theory Agent API",
-    version="0.3.0",
+    version="0.4.0",
     lifespan=lifespan,
 )
 app.add_middleware(
@@ -162,8 +181,7 @@ def search_api(request: SearchRequest) -> list[SearchHit]:
     return [SearchHit(**hit) for hit in search(request.query, request.limit)]
 
 
-@app.post("/api/chat", response_model=ChatResponse)
-async def chat_api(request: ChatRequest) -> ChatResponse:
+async def execute_chat(request: ChatRequest, status_emitter: StatusEmitter | None = None) -> ChatResponse:
     if request.conversation_id:
         conversation_id = ensure_uuid(request.conversation_id)
         get_conversation(conversation_id, request.client_id)
@@ -175,14 +193,23 @@ async def chat_api(request: ChatRequest) -> ChatResponse:
     memories = memory_texts(request.client_id)
     is_first_turn = message_count(conversation_id) == 0
 
-    add_message(conversation_id, "user", request.message)
+    images = validate_images(request.images)
+    user_text = request.message.strip()
+    add_message(conversation_id, "user", user_text, attachments=images)
 
-    hits = search(request.message, request.limit)
+    search_query = user_text or "number theory mathematics"
+    if status_emitter is not None:
+        await status_emitter("retrieving", None)
+    hits = search(search_query, request.limit)
     content, mode, gate, tool_results = await answer(
-        request.message,
+        user_text,
         hits,
         history=history,
         memories=memories,
+        answer_mode=request.answer_mode,
+        teach_depth=request.teach_depth,
+        images=images or None,
+        status_emitter=status_emitter,
     )
 
     add_message(
@@ -196,20 +223,22 @@ async def chat_api(request: ChatRequest) -> ChatResponse:
     )
 
     if is_first_turn:
-        touch_conversation(conversation_id, title=suggest_title(request.message))
+        touch_conversation(conversation_id, title=suggest_title(user_text or "Image message"))
     else:
         touch_conversation(conversation_id)
 
     new_memories = await extract_and_store_memories(
         request.client_id,
         conversation_id,
-        request.message,
+        request.message or user_text,
         content,
     )
 
+    answer_mode = mode if mode in {"teach", "solve", "research", "retrieval"} else "teach"
     return ChatResponse(
         answer=content,
         mode=mode,
+        answer_mode=answer_mode,
         verification=_legacy_verification(gate.level),
         verification_level=gate.level,
         verification_label=gate.label,
@@ -220,7 +249,174 @@ async def chat_api(request: ChatRequest) -> ChatResponse:
         tool_results=tool_results,
         conversation_id=conversation_id,
         new_memories=new_memories,
+        teach_depth=request.teach_depth,
     )
+
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat_api(request: ChatRequest) -> ChatResponse:
+    return await execute_chat(request)
+
+
+@app.post("/api/chat/stream")
+async def chat_stream_api(request: ChatRequest) -> StreamingResponse:
+    async def event_stream():
+        queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+
+        async def on_status(phase: str, detail: str | None = None) -> None:
+            await queue.put({"type": "status", "phase": phase, "detail": detail})
+
+        async def worker() -> None:
+            try:
+                response = await execute_chat(request, status_emitter=on_status)
+                await queue.put({"type": "done", **response.model_dump(mode="json")})
+            except Exception as exc:  # noqa: BLE001
+                await queue.put({"type": "error", "message": str(exc)})
+            finally:
+                await queue.put(None)
+
+        task = asyncio.create_task(worker())
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+        finally:
+            await task
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/formalize/statement", response_model=FormalizeStatementResponse)
+async def formalize_statement_api(request: FormalizeStatementRequest) -> FormalizeStatementResponse:
+    result = await propose_statement(request.question, request.method)
+    return FormalizeStatementResponse(**result)
+
+
+@app.post("/api/formalize/proof", response_model=FormalizeProofResponse)
+async def formalize_proof_api(request: FormalizeProofRequest) -> FormalizeProofResponse:
+    result = await generate_proof_draft(
+        request.statement,
+        question=request.question,
+        method=request.method,
+    )
+    return FormalizeProofResponse(**result)
+
+
+@app.post("/api/formalize/verify", response_model=FormalizeVerifyResponse)
+async def formalize_verify_api(request: FormalizeVerifyRequest) -> FormalizeVerifyResponse:
+    result = await verify_statement(
+        request.question,
+        request.statement,
+        request.code,
+        method=request.method,
+    )
+    return FormalizeVerifyResponse(**result)
+
+
+@app.post("/api/latex/from-image", response_model=LatexFromImageResponse)
+async def latex_from_image_api(request: LatexFromImageRequest) -> LatexFromImageResponse:
+    result = await image_to_latex(request.image)
+    return LatexFromImageResponse(**result)
+
+
+@app.post("/api/conversations/{conversation_id}/attach-verification", response_model=MessageOut)
+def attach_verification(
+    conversation_id: str,
+    request: AttachVerificationRequest,
+) -> MessageOut:
+    """Attach a Lean-workbench verification result to an existing chat transcript."""
+    ensure_uuid(conversation_id)
+    get_conversation(conversation_id, request.client_id)
+    add_message(
+        conversation_id,
+        "assistant",
+        request.content,
+        verification_level=request.verification_level,
+        verification_label=request.verification_label or request.verification_level,
+        verification_notes=request.verification_notes,
+        tool_results=request.tool_results,
+    )
+    touch_conversation(conversation_id)
+    rows = list_messages(conversation_id, request.client_id)
+    return MessageOut(**rows[-1])
+
+
+@app.get("/api/conversations/{conversation_id}/verification-log")
+def verification_log(
+    conversation_id: str,
+    client_id: str = Query(min_length=8, max_length=64),
+) -> Response:
+    """Downloadable JSON log: every message with its gate level, notes, and tool calls."""
+    ensure_uuid(conversation_id)
+    conversation = get_conversation(conversation_id, client_id)
+    rows = list_messages(conversation_id, client_id)
+    payload = {
+        "conversation_id": conversation_id,
+        "title": conversation["title"],
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "messages": [
+            {
+                "id": row["id"],
+                "role": row["role"],
+                "content": row["content"],
+                "verification_level": row.get("verification_level"),
+                "verification_label": row.get("verification_label"),
+                "verification_notes": row.get("verification_notes") or [],
+                "tool_results": row.get("tool_results") or [],
+                "created_at": row["created_at"].isoformat(),
+            }
+            for row in rows
+        ],
+    }
+    filename = f"verification-log-{conversation_id[:8]}.json"
+    return Response(
+        content=json.dumps(payload, ensure_ascii=False, indent=2),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/api/notebook", response_model=list[NotebookEntryOut])
+def notebook_list(client_id: str = Query(min_length=8, max_length=64)) -> list[NotebookEntryOut]:
+    return [NotebookEntryOut(**row) for row in list_entries(client_id)]
+
+
+@app.get("/api/notebook/export")
+def notebook_export(client_id: str = Query(min_length=8, max_length=64)) -> Response:
+    payload = export_notebook(client_id)
+    return Response(
+        content=json.dumps(payload, ensure_ascii=False, indent=2),
+        media_type="application/json",
+        headers={"Content-Disposition": 'attachment; filename="notebook-export.json"'},
+    )
+
+
+@app.post("/api/notebook", response_model=NotebookEntryOut)
+def notebook_create(request: NotebookCreate) -> NotebookEntryOut:
+    return NotebookEntryOut(
+        **create_entry(
+            request.client_id,
+            request.kind,
+            request.title,
+            request.content,
+            request.payload,
+        )
+    )
+
+
+@app.delete("/api/notebook/{entry_id}")
+def notebook_delete(
+    entry_id: int,
+    client_id: str = Query(min_length=8, max_length=64),
+) -> dict[str, str]:
+    delete_entry(entry_id, client_id)
+    return {"status": "deleted"}
 
 
 @app.get("/api/tools/status")

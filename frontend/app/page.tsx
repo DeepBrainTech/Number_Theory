@@ -1,25 +1,19 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import ChatComposer from "./components/ChatComposer";
+import ThinkingStatus, { LoadingStatus, streamChat } from "./components/ThinkingStatus";
+import LeanWorkbench from "./components/LeanWorkbench";
+import ModeDropdown, { ANSWER_MODE_OPTIONS, TEACH_DEPTH_OPTIONS } from "./components/ModeDropdown";
 import MathMarkdown from "./components/MathMarkdown";
-
-type Stats = {
-  documents: number;
-  chunks: number;
-  page_start: number | null;
-  page_end: number | null;
-  block_types: Record<string, number>;
-  embedding_model?: string | null;
-};
+import MemoryPanel from "./components/MemoryPanel";
+import NotebookPanel from "./components/NotebookPanel";
 
 type Message = {
   id?: number;
   role: "user" | "assistant";
   content: string;
-  verification?: string;
-  verificationLevel?: string;
-  verificationLabel?: string;
-  verificationNotes?: string[];
+  images?: string[];
 };
 
 type Conversation = {
@@ -44,33 +38,29 @@ type ToolStatus = {
   embedding?: { model: string; configured: boolean; dimensions: number };
 };
 
+type LabResult = {
+  operation: string;
+  args: string;
+  ok: boolean;
+  output: string;
+};
+
+type NotebookEntry = {
+  id: number;
+  kind: "experiment" | "conjecture" | "counterexample";
+  title: string;
+  content: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+};
+
+type TeachDepth = "hint" | "socratic" | "full";
+
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 const CLIENT_KEY = "nt_client_id";
 
-const WELCOME: Message = {
-  role: "assistant",
-  content:
-    "Chapter 1 is ready. Ask about divisibility, Euclid’s algorithm, Bézout’s lemma, linear congruences, the Chinese Remainder Theorem, and prime factorization. Answers use LaTeX and carry a V0–V4 correctness level.",
-  verificationLevel: "system",
-  verificationLabel: "System",
-};
-
-function badgeClass(level?: string): string {
-  switch (level) {
-    case "V4":
-      return "verification v4";
-    case "V3":
-      return "verification v3";
-    case "V2":
-      return "verification v2";
-    case "V1":
-      return "verification v1";
-    case "retrieval_only":
-      return "verification retrieval";
-    default:
-      return "verification v0";
-  }
-}
+type AnswerMode = "auto" | "teach" | "solve" | "research";
+type RightView = "chat" | "lean" | "notebook" | "memory";
 
 function ensureClientId(): string {
   const existing = window.localStorage.getItem(CLIENT_KEY);
@@ -96,19 +86,44 @@ function formatTime(value: string): string {
   }
 }
 
+function placeholderFor(mode: AnswerMode): string {
+  switch (mode) {
+    case "solve":
+      return "Ask a problem to solve…";
+    case "teach":
+      return "Ask something you'd like to understand…";
+    case "research":
+      return "Ask about the literature or open questions…";
+    default:
+      return "Ask anything…";
+  }
+}
+
 export default function Home() {
   const [clientId, setClientId] = useState("");
-  const [stats, setStats] = useState<Stats | null>(null);
   const [tools, setTools] = useState<ToolStatus | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<Message[]>([WELCOME]);
+  const [messages, setMessages] = useState<Message[]>([]);
   const [memories, setMemories] = useState<Memory[]>([]);
   const [input, setInput] = useState("");
+  const [pendingImages, setPendingImages] = useState<string[]>([]);
+  const [rightView, setRightView] = useState<RightView>("chat");
+  const [answerMode, setAnswerMode] = useState<AnswerMode>("auto");
+  const [teachDepth, setTeachDepth] = useState<TeachDepth>("full");
   const [memoryDraft, setMemoryDraft] = useState("");
   const [loading, setLoading] = useState(false);
+  const [loadingStatus, setLoadingStatus] = useState<LoadingStatus | null>(null);
   const [switching, setSwitching] = useState(false);
   const [error, setError] = useState("");
+  const [labOp, setLabOp] = useState<string>("gcd");
+  const [labArgs, setLabArgs] = useState("");
+  const [labSplit, setLabSplit] = useState("");
+  const [labBusy, setLabBusy] = useState(false);
+  const [labResults, setLabResults] = useState<LabResult[]>([]);
+  const [notebook, setNotebook] = useState<NotebookEntry[]>([]);
+  const [conjectureDraft, setConjectureDraft] = useState("");
+  const composerFormRef = useRef<HTMLFormElement>(null);
 
   const refreshConversations = useCallback(async (cid: string) => {
     const response = await fetch(`${API_BASE}/api/conversations?client_id=${encodeURIComponent(cid)}`);
@@ -122,6 +137,12 @@ export default function Home() {
     const response = await fetch(`${API_BASE}/api/memories?client_id=${encodeURIComponent(cid)}`);
     if (!response.ok) throw new Error("Failed to load memories");
     setMemories(await response.json());
+  }, []);
+
+  const refreshNotebook = useCallback(async (cid: string) => {
+    const response = await fetch(`${API_BASE}/api/notebook?client_id=${encodeURIComponent(cid)}`);
+    if (!response.ok) throw new Error("Failed to load notebook");
+    setNotebook(await response.json());
   }, []);
 
   const loadConversation = useCallback(async (cid: string, conversationId: string) => {
@@ -138,20 +159,17 @@ export default function Home() {
           id: number;
           role: "user" | "assistant";
           content: string;
-          verification_level?: string;
-          verification_label?: string;
-          verification_notes?: string[];
+          attachments?: string[];
         }) => ({
           id: item.id,
           role: item.role,
           content: item.content,
-          verificationLevel: item.verification_level,
-          verificationLabel: item.verification_label,
-          verificationNotes: item.verification_notes ?? [],
+          images: item.attachments?.length ? item.attachments : undefined,
         }),
       );
       setActiveId(conversationId);
-      setMessages(mapped.length > 0 ? mapped : [WELCOME]);
+      setRightView("chat");
+      setMessages(mapped);
     } finally {
       setSwitching(false);
     }
@@ -162,27 +180,33 @@ export default function Home() {
     setClientId(cid);
 
     Promise.all([
-      fetch(`${API_BASE}/api/library/stats`),
       fetch(`${API_BASE}/api/tools/status`),
       refreshConversations(cid),
       refreshMemories(cid),
+      refreshNotebook(cid),
     ])
-      .then(async ([statsResponse, toolsResponse, convs]) => {
-        if (!statsResponse.ok || !toolsResponse.ok) throw new Error("Failed to load system status");
-        setStats(await statsResponse.json());
+      .then(async ([toolsResponse, convs]) => {
+        if (!toolsResponse.ok) throw new Error("Failed to load system status");
         setTools(await toolsResponse.json());
         if (convs.length > 0) {
           await loadConversation(cid, convs[0].id);
         }
       })
       .catch((reason: Error) => setError(reason.message));
-  }, [loadConversation, refreshConversations, refreshMemories]);
+  }, [loadConversation, refreshConversations, refreshMemories, refreshNotebook]);
 
   async function startNewChat() {
     if (!clientId || loading) return;
     setActiveId(null);
-    setMessages([WELCOME]);
+    setRightView("chat");
+    setMessages([]);
+    setPendingImages([]);
     setError("");
+  }
+
+  function openChat(conversationId: string) {
+    if (!clientId) return;
+    void loadConversation(clientId, conversationId);
   }
 
   async function removeConversation(conversationId: string) {
@@ -201,7 +225,7 @@ export default function Home() {
         await loadConversation(clientId, remaining[0].id);
       } else {
         setActiveId(null);
-        setMessages([WELCOME]);
+        setMessages([]);
       }
     }
   }
@@ -236,79 +260,249 @@ export default function Home() {
     await refreshMemories(clientId);
   }
 
-  async function submit(event: FormEvent) {
+  async function runLab(event: FormEvent) {
     event.preventDefault();
-    const question = input.trim();
-    if (!question || loading || !clientId) return;
-
-    setMessages((current) => [...current, { role: "user", content: question }]);
-    setInput("");
-    setLoading(true);
-    setError("");
+    const args = labArgs
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (args.length === 0 || labBusy || !clientId) return;
+    setLabBusy(true);
     try {
-      const response = await fetch(`${API_BASE}/api/chat`, {
+      const response = await fetch(`${API_BASE}/api/tools/sage`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          operation: labOp,
+          arguments: args,
+          split: labSplit.trim() ? Number.parseInt(labSplit, 10) : null,
+        }),
+      });
+      const data = await response.json();
+      const output = data.ok ? JSON.stringify(data.result) : (data.error ?? "failed");
+      setLabResults((current) =>
+        [{ operation: labOp, args: args.join(","), ok: Boolean(data.ok), output }, ...current].slice(0, 6),
+      );
+      if (data.ok) {
+        await fetch(`${API_BASE}/api/notebook`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            client_id: clientId,
+            kind: "experiment",
+            title: `${labOp}(${args.join(",")})`,
+            content: output,
+            payload: {
+              operation: labOp,
+              arguments: args,
+              result: data.result,
+              engine: data.engine,
+            },
+          }),
+        });
+        await refreshNotebook(clientId);
+      }
+    } catch {
+      setLabResults((current) =>
+        [{ operation: labOp, args: args.join(","), ok: false, output: "request failed" }, ...current].slice(0, 6),
+      );
+    } finally {
+      setLabBusy(false);
+    }
+  }
+
+  async function saveConjecture(event: FormEvent) {
+    event.preventDefault();
+    const text = conjectureDraft.trim();
+    if (!clientId || !text) return;
+    const response = await fetch(`${API_BASE}/api/notebook`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_id: clientId,
+        kind: "conjecture",
+        title: text.slice(0, 80),
+        content: text,
+        payload: {},
+      }),
+    });
+    if (!response.ok) {
+      setError("Failed to save conjecture");
+      return;
+    }
+    setConjectureDraft("");
+    await refreshNotebook(clientId);
+  }
+
+  async function removeNotebookEntry(entryId: number) {
+    if (!clientId) return;
+    const response = await fetch(
+      `${API_BASE}/api/notebook/${entryId}?client_id=${encodeURIComponent(clientId)}`,
+      { method: "DELETE" },
+    );
+    if (!response.ok) {
+      setError("Failed to delete notebook entry");
+      return;
+    }
+    await refreshNotebook(clientId);
+  }
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    const question = input.trim();
+    const images = [...pendingImages];
+    if ((!question && images.length === 0) || loading || !clientId) return;
+
+    setMessages((current) => [
+      ...current,
+      { role: "user", content: question, images: images.length ? images : undefined },
+    ]);
+    setInput("");
+    setPendingImages([]);
+    setLoading(true);
+    setLoadingStatus({ phase: "retrieving" });
+    setError("");
+    try {
+      const data = await streamChat(
+        API_BASE,
+        {
           message: question,
+          images,
           limit: 5,
           client_id: clientId,
           conversation_id: activeId,
-        }),
-      });
-      if (!response.ok) throw new Error("Failed to get a reply");
-      const data = await response.json();
-      setActiveId(data.conversation_id);
+          answer_mode: answerMode,
+          teach_depth: teachDepth,
+        },
+        setLoadingStatus,
+      );
+      setActiveId(data.conversation_id as string);
       setMessages((current) => [
         ...current,
         {
           role: "assistant",
-          content: data.answer,
-          verification: data.verification,
-          verificationLevel: data.verification_level,
-          verificationLabel: data.verification_label,
-          verificationNotes: data.verification_notes ?? [],
+          content: data.answer as string,
         },
       ]);
       await refreshConversations(clientId);
-      if (data.new_memories?.length) {
+      if ((data.new_memories as unknown[] | undefined)?.length) {
         await refreshMemories(clientId);
       }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Unknown error");
     } finally {
       setLoading(false);
+      setLoadingStatus(null);
     }
   }
 
-  const activeTitle =
-    conversations.find((item) => item.id === activeId)?.title ?? (activeId ? "Chat" : "New chat");
+  const isEmptyChat = messages.length === 0;
+
+  const composerSection = (
+    <div className="composerWrap">
+      {error && <p className="error">{error}</p>}
+      <form className="composer" onSubmit={submit} ref={composerFormRef}>
+        <ChatComposer
+          disabled={loading || !clientId}
+          images={pendingImages}
+          onChange={setInput}
+          onEnterSubmit={() => composerFormRef.current?.requestSubmit()}
+          onImagesChange={setPendingImages}
+          placeholder={placeholderFor(answerMode)}
+          value={input}
+        />
+        <div className="composerFooter">
+          <div className="composerFooterLeft">
+            <ModeDropdown
+              ariaLabel="Answer mode"
+              disabled={loading}
+              onChange={(value) => setAnswerMode(value as AnswerMode)}
+              options={ANSWER_MODE_OPTIONS}
+              value={answerMode}
+            />
+            {answerMode !== "research" && (
+              <ModeDropdown
+                ariaLabel="Answer depth"
+                disabled={loading}
+                onChange={(value) => setTeachDepth(value as TeachDepth)}
+                options={TEACH_DEPTH_OPTIONS}
+                value={teachDepth}
+              />
+            )}
+          </div>
+          <button
+            disabled={loading || (!input.trim() && pendingImages.length === 0) || !clientId}
+            type="submit"
+          >
+            Ask
+          </button>
+        </div>
+      </form>
+    </div>
+  );
 
   return (
     <main className="shell">
       <aside className="sidebar">
-        <div>
-          <p className="eyebrow">NUMBER THEORY</p>
-          <h1>Number Theory Agent</h1>
-          <p className="subtitle">Correctness first, starting from one reliable chapter.</p>
-        </div>
+        <nav className="sidebarTools" aria-label="Tools">
+          <button
+            className={`toolNavItem ${rightView === "chat" && !activeId ? "active" : ""}`}
+            disabled={loading}
+            onClick={startNewChat}
+            type="button"
+          >
+            <span className="toolNavIcon">✎</span>
+            New chat
+          </button>
+          <button
+            className={`toolNavItem ${rightView === "lean" ? "active" : ""}`}
+            onClick={() => {
+              setRightView("lean");
+              setError("");
+            }}
+            type="button"
+          >
+            <span className="toolNavIcon">λ</span>
+            Lean workbench
+          </button>
+          <button
+            className={`toolNavItem ${rightView === "notebook" ? "active" : ""}`}
+            onClick={() => {
+              setRightView("notebook");
+              setError("");
+            }}
+            type="button"
+          >
+            <span className="toolNavIcon">∑</span>
+            Notebook
+          </button>
+          <button
+            className={`toolNavItem ${rightView === "memory" ? "active" : ""}`}
+            onClick={() => {
+              setRightView("memory");
+              setError("");
+            }}
+            type="button"
+          >
+            <span className="toolNavIcon">◎</span>
+            Memory
+          </button>
+        </nav>
 
-        <button className="newChatBtn" disabled={loading} onClick={startNewChat} type="button">
-          + New chat
-        </button>
-
-        <section className="conversationSection">
-          <h2>Chats</h2>
+        <section className="conversationSection sidebarChats">
+          <h2>Recent</h2>
           <div className="conversationList">
             {conversations.length === 0 && <p className="emptyHint">No saved chats yet</p>}
             {conversations.map((item) => (
               <div
-                className={`conversationItem ${item.id === activeId ? "active" : ""}`}
+                className={`conversationItem ${
+                  rightView === "chat" && item.id === activeId ? "active" : ""
+                }`}
                 key={item.id}
               >
                 <button
                   className="conversationMain"
-                  onClick={() => loadConversation(clientId, item.id)}
+                  onClick={() => openChat(item.id)}
                   type="button"
                 >
                   <span className="conversationTitle">{item.title}</span>
@@ -326,130 +520,117 @@ export default function Home() {
             ))}
           </div>
         </section>
-
-        <section className="memorySection">
-          <h2>Long-term memory</h2>
-          <p className="sectionHint">Remember learning goals and preferences across chats</p>
-          <ul className="memoryList">
-            {memories.length === 0 && (
-              <li className="emptyHint">No memories yet — they are extracted from chat</li>
-            )}
-            {memories.map((item) => (
-              <li key={item.id}>
-                <span>{item.content}</span>
-                <button
-                  aria-label="Delete memory"
-                  className="iconBtn"
-                  onClick={() => removeMemory(item.id)}
-                  type="button"
-                >
-                  ×
-                </button>
-              </li>
-            ))}
-          </ul>
-          <form className="memoryForm" onSubmit={addMemoryManually}>
-            <input
-              onChange={(event) => setMemoryDraft(event.target.value)}
-              placeholder="Add a memory manually"
-              value={memoryDraft}
-            />
-            <button disabled={!memoryDraft.trim()} type="submit">
-              Add
-            </button>
-          </form>
-        </section>
-
-        <section className="statusCard compact">
-          <div className="statusHeading">
-            <span className="statusDot" />
-            Library
-          </div>
-          <dl>
-            <div>
-              <dt>Docs / chunks</dt>
-              <dd>
-                {stats?.documents ?? "—"} / {stats?.chunks ?? "—"}
-              </dd>
-            </div>
-            <div>
-              <dt>Checks</dt>
-              <dd className="smallDd">
-                {[
-                  tools?.openai.configured ? "Model" : null,
-                  tools?.sage.available ? "Sage" : null,
-                  tools?.lean.available ? "Lean" : null,
-                ]
-                  .filter(Boolean)
-                  .join(" · ") || "—"}
-              </dd>
-            </div>
-          </dl>
-        </section>
       </aside>
 
       <section className="chatPanel">
-        <header className="chatHeader">
-          <div>
-            <span className="chapterTag">HILL · CHAPTER 1</span>
-            <h2>{activeTitle}</h2>
-          </div>
-          <span className="modeTag">
-            {tools?.openai.configured ? "OPENAI · V0–V4 gating" : "Retrieval mode"}
-          </span>
-        </header>
-
-        <div className="messages" aria-live="polite">
-          {switching ? (
-            <p className="thinking">Loading chat…</p>
-          ) : (
-            messages.map((message, index) => (
-              <article className={`message ${message.role}`} key={message.id ?? `${message.role}-${index}`}>
-                <div className="avatar">{message.role === "assistant" ? "N" : "You"}</div>
-                <div className="bubble">
-                  {message.role === "assistant" ? (
-                    <MathMarkdown content={message.content} />
-                  ) : (
-                    <p>{message.content}</p>
-                  )}
-                  {message.role === "assistant" && message.verificationLabel && (
-                    <div className={badgeClass(message.verificationLevel)}>
-                      <span>{message.verificationLabel}</span>
-                      {message.verificationNotes && message.verificationNotes.length > 0 && (
-                        <ul>
-                          {message.verificationNotes.slice(0, 4).map((note) => (
-                            <li key={note}>{note}</li>
-                          ))}
-                        </ul>
-                      )}
-                    </div>
-                  )}
-                </div>
-              </article>
-            ))
-          )}
-          {loading && <p className="thinking">Retrieving, generating, and gating for correctness…</p>}
-        </div>
-
-        <div className="composerWrap">
-          {error && <p className="error">{error}</p>}
-          <form className="composer" onSubmit={submit}>
-            <textarea
-              aria-label="Ask a number theory question"
-              onChange={(event) => setInput(event.target.value)}
-              placeholder="e.g. How do I compute $\gcd(391,299)$ with Euclid’s algorithm?"
-              rows={2}
-              value={input}
+        {rightView === "lean" ? (
+          <>
+            {error && <p className="error leanError">{error}</p>}
+            <LeanWorkbench
+              apiBase={API_BASE}
+              clientId={clientId}
+              conversationId={activeId}
+              leanAvailable={Boolean(tools?.lean.available)}
+              modelConfigured={Boolean(tools?.openai.configured)}
+              onAttachedToChat={async () => {
+                if (clientId && activeId) {
+                  await loadConversation(clientId, activeId);
+                  setRightView("chat");
+                }
+              }}
+              onError={setError}
             />
-            <button disabled={loading || !input.trim() || !clientId} type="submit">
-              Ask
-            </button>
-          </form>
-          <p className="notice">
-            V4 means the Lean formal statement passed; V2 means a concrete computation passed.
-            Problem translation and general proofs still need human review.
-          </p>
-        </div>
+          </>
+        ) : rightView === "notebook" ? (
+          <>
+            {error && <p className="error toolPanelError">{error}</p>}
+            <NotebookPanel
+              apiBase={API_BASE}
+              clientId={clientId}
+              conjectureDraft={conjectureDraft}
+              entries={notebook}
+              labArgs={labArgs}
+              labBusy={labBusy}
+              labOp={labOp}
+              labResults={labResults}
+              labSplit={labSplit}
+              onConjectureDraftChange={setConjectureDraft}
+              onDeleteEntry={removeNotebookEntry}
+              onLabArgsChange={setLabArgs}
+              onLabOpChange={setLabOp}
+              onLabSplitChange={setLabSplit}
+              onRunLab={runLab}
+              onSaveConjecture={saveConjecture}
+            />
+          </>
+        ) : rightView === "memory" ? (
+          <>
+            {error && <p className="error toolPanelError">{error}</p>}
+            <MemoryPanel
+              draft={memoryDraft}
+              memories={memories}
+              onAdd={addMemoryManually}
+              onDelete={removeMemory}
+              onDraftChange={setMemoryDraft}
+            />
+          </>
+        ) : (
+          <div className={`chatView ${isEmptyChat ? "chatViewEmpty" : ""}`}>
+            {isEmptyChat ? (
+              <div className="chatEmptyState">
+                {switching ? (
+                  <p className="thinking">Loading chat…</p>
+                ) : (
+                  <>
+                    <h2 className="chatEmptyTitle">Where do we start ?</h2>
+                    {loading && loadingStatus && <ThinkingStatus status={loadingStatus} />}
+                    {composerSection}
+                  </>
+                )}
+              </div>
+            ) : (
+              <>
+                <div className="messages" aria-live="polite">
+                  {switching ? (
+                    <p className="thinking">Loading chat…</p>
+                  ) : (
+                    messages.map((message, index) => (
+                      <article
+                        className={`message ${message.role}`}
+                        key={message.id ?? `${message.role}-${index}`}
+                      >
+                        <div className="avatar">{message.role === "assistant" ? "N" : "You"}</div>
+                        <div className="bubble">
+                          {message.role === "assistant" ? (
+                            <MathMarkdown content={message.content} />
+                          ) : (
+                            <>
+                              {message.images && message.images.length > 0 && (
+                                <div className="messageImages">
+                                  {message.images.map((src, imageIndex) => (
+                                    // eslint-disable-next-line @next/next/no-img-element
+                                    <img
+                                      alt={`Uploaded ${imageIndex + 1}`}
+                                      key={`${message.id ?? index}-${imageIndex}`}
+                                      src={src}
+                                    />
+                                  ))}
+                                </div>
+                              )}
+                              {message.content ? <p>{message.content}</p> : null}
+                            </>
+                          )}
+                        </div>
+                      </article>
+                    ))
+                  )}
+                  {loading && loadingStatus && <ThinkingStatus status={loadingStatus} />}
+                </div>
+                {composerSection}
+              </>
+            )}
+          </div>
+        )}
       </section>
     </main>
   );

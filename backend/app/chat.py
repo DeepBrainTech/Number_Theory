@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import json
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -9,35 +11,79 @@ from openai import AsyncOpenAI
 from .config import settings
 from .gating import GateResult, gate_answer
 from .memory import format_memory_block
-from .verification import call_lean, call_sage
+from .modes import (
+    AnswerMode,
+    ResolvedMode,
+    TeachDepth,
+    enforce_research_structure,
+    resolve_answer_mode,
+    system_prompt_for,
+)
+from .latex_ocr import decode_image
+from .research import (
+    arxiv_search,
+    crossref_search,
+    literature_search,
+    oeis_search,
+    semantic_scholar_search,
+)
+from .verification import call_sage
 
 
-SYSTEM_PROMPT = """You are a rigorous number-theory teacher and research assistant.
-Ground definitions and arguments in retrieved material first, then independently check domains, theorem hypotheses, edge cases, and counterexamples.
-Call SageMath for concrete integer computation; call Lean when the user asks for a formal proof or when a key claim is suitable for formalization.
-A Lean success only verifies the submitted formal statement; you must still confirm that statement faithfully captures the user's question.
-If tools fail or evidence is insufficient, state uncertainty clearly and never present model speculation as verified fact.
-Do not mention book titles, PDF page numbers, or internal retrieval steps by default. Use clear English and LaTeX (inline $...$, display $$...$$ on their own lines). Never use \\[...\\] or \\(...\\) delimiters.
-LaTeX notation rules:
-- Congruences: write $x \\equiv a \\pmod{n}$, never $x \\equiv a | (\\mathrm{mod}\\, n)$ or a bare vertical bar before (mod ...).
-- Products/juxtaposition: write $11k$ or $11k$, never $11|k$ unless you mean “11 divides k”.
-- Use `|` or $\\mid$ only for the divides relation (e.g. $d\\mid n$), not for spacing, punctuation, or modular notation.
-- Prefer $\\pmod{n}$ for congruences; use $d\\mid n$ only when stating divisibility.
-If long-term user information is provided, use it naturally without reciting the whole memory list."""
+SAGE_OPERATIONS = [
+    "gcd",
+    "xgcd",
+    "factor",
+    "is_prime",
+    "inverse_mod",
+    "crt",
+    "power_mod",
+    "euler_phi",
+    "multiplicative_order",
+    "legendre_symbol",
+    "kronecker",
+    "primitive_root",
+    "divisors",
+    "next_prime",
+    "quadratic_class_number",
+    "elliptic_curve_invariants",
+    "pari_bnfinit",
+    "ideal_prime_dec",
+    "pari_polgalois",
+]
 
-TOOLS: list[dict[str, Any]] = [
+
+StatusEmitter = Callable[[str, str | None], Awaitable[None]]
+
+
+async def emit_status(emitter: StatusEmitter | None, phase: str, detail: str | None = None) -> None:
+    if emitter is not None:
+        await emitter(phase, detail)
+
+
+# Lean formalization lives in the Lean workbench UI (statement confirm → compile).
+# Chat agents keep Sage for concrete checks; they should not silently claim V4.
+BASE_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "name": "sage_calculate",
-        "description": "Exact integer computation via SageMath. Supports only gcd, xgcd, factor, is_prime, inverse_mod, crt.",
+        "description": (
+            "Exact number-theory computation via SageMath (whitelisted operations only). "
+            "Arguments are decimal integers as strings. Signatures: gcd(a,b); xgcd(a,b); "
+            "factor(n); is_prime(n); inverse_mod(a,m); crt(residues+moduli with split as the "
+            "boundary index); power_mod(a,e,m); euler_phi(n); multiplicative_order(a,m); "
+            "legendre_symbol(a,p) with p an odd prime; kronecker(a,n); primitive_root(m); "
+            "divisors(n); next_prime(n); quadratic_class_number(d) with d a squarefree integer "
+            "(class number of Q(sqrt(d))); elliptic_curve_invariants(a1,a2,a3,a4,a6); "
+            "pari_bnfinit(a0..an) for NumberField invariants of Q[x]/(a0+...+an x^n); "
+            "ideal_prime_dec(a0..an,p) for prime ideal factorization of (p); "
+            "pari_polgalois(a0..an) for the Galois group label of an irreducible poly."
+        ),
         "strict": True,
         "parameters": {
             "type": "object",
             "properties": {
-                "operation": {
-                    "type": "string",
-                    "enum": ["gcd", "xgcd", "factor", "is_prime", "inverse_mod", "crt"],
-                },
+                "operation": {"type": "string", "enum": SAGE_OPERATIONS},
                 "arguments": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -49,24 +95,99 @@ TOOLS: list[dict[str, Any]] = [
             "additionalProperties": False,
         },
     },
+]
+
+RESEARCH_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
-        "name": "lean_verify",
-        "description": "Compile a complete Lean 4 + mathlib proof. No sorry, admit, or new axioms.",
+        "name": "arxiv_search",
+        "description": (
+            "Search arXiv preprints. Pass a short natural-language query (topic + optional year, "
+            "e.g. 'mathematics 2026' or 'number theory 2024'); do not write submittedDate syntax."
+        ),
         "strict": True,
         "parameters": {
             "type": "object",
             "properties": {
-                "code": {
-                    "type": "string",
-                    "description": "Lean 4 code starting with import Mathlib and including a theorem/example with a full proof.",
-                }
+                "query": {"type": "string"},
+                "max_results": {"type": ["integer", "null"], "description": "1-10, default 5."},
             },
-            "required": ["code"],
+            "required": ["query", "max_results"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "type": "function",
+        "name": "oeis_search",
+        "description": (
+            "Search the OEIS. Query with comma-separated terms (e.g. '1,1,2,3,5,8') "
+            "or keywords; returns sequence ids, names, and initial terms."
+        ),
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "max_results": {"type": ["integer", "null"], "description": "1-10, default 3."},
+            },
+            "required": ["query", "max_results"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "type": "function",
+        "name": "crossref_search",
+        "description": "Search Crossref for published papers (title, authors, year, DOI).",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "max_results": {"type": ["integer", "null"], "description": "1-10, default 5."},
+            },
+            "required": ["query", "max_results"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "type": "function",
+        "name": "semantic_scholar_search",
+        "description": "Search Semantic Scholar for papers (title, abstract, citations, DOI).",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "max_results": {"type": ["integer", "null"], "description": "1-10, default 5."},
+            },
+            "required": ["query", "max_results"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "type": "function",
+        "name": "literature_search",
+        "description": (
+            "Fan-out search across arXiv + Crossref + Semantic Scholar with DOI/title deduplication. "
+            "Prefer this when surveying a topic broadly. Use natural language (topic + year)."
+        ),
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "max_results": {"type": ["integer", "null"], "description": "1-10, default 5."},
+            },
+            "required": ["query", "max_results"],
             "additionalProperties": False,
         },
     },
 ]
+
+
+def tools_for(_mode: ResolvedMode) -> list[dict[str, Any]]:
+    """Sage + literature tools in every mode; research mode only changes the answer template."""
+    return BASE_TOOLS + RESEARCH_TOOLS
 
 
 def retrieval_answer(hits: list[dict]) -> str:
@@ -90,8 +211,26 @@ async def _execute_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if name == "sage_calculate":
             result = await call_sage(arguments)
             return {"tool": name, **arguments, **result}
-        if name == "lean_verify":
-            result = await call_lean(arguments)
+        if name == "arxiv_search":
+            result = await arxiv_search(arguments.get("query", ""), arguments.get("max_results") or 5)
+            return {"tool": name, **arguments, **result}
+        if name == "oeis_search":
+            result = await oeis_search(arguments.get("query", ""), arguments.get("max_results") or 3)
+            return {"tool": name, **arguments, **result}
+        if name == "crossref_search":
+            result = await crossref_search(
+                arguments.get("query", ""), arguments.get("max_results") or 5
+            )
+            return {"tool": name, **arguments, **result}
+        if name == "semantic_scholar_search":
+            result = await semantic_scholar_search(
+                arguments.get("query", ""), arguments.get("max_results") or 5
+            )
+            return {"tool": name, **arguments, **result}
+        if name == "literature_search":
+            result = await literature_search(
+                arguments.get("query", ""), arguments.get("max_results") or 5
+            )
             return {"tool": name, **arguments, **result}
         return {"tool": name, "ok": False, "error": f"Unknown tool: {name}"}
     except (httpx.HTTPError, ValueError) as exc:
@@ -113,8 +252,39 @@ def _legacy_verification(level: str) -> str:
 def suggest_title(message: str) -> str:
     cleaned = " ".join(message.strip().split())
     if len(cleaned) <= 24:
-        return cleaned or "New chat"
+        return cleaned or "Image message"
     return cleaned[:24].rstrip() + "…"
+
+
+def validate_images(images: list[str]) -> list[str]:
+    validated: list[str] = []
+    for image in images:
+        raw, media_type = decode_image(image)
+        b64 = base64.b64encode(raw).decode("ascii")
+        validated.append(f"data:{media_type};base64,{b64}")
+    return validated
+
+
+def build_user_turn(
+    message: str,
+    *,
+    mode_label: str,
+    depth_note: str,
+    context: str,
+    images: list[str] | None = None,
+) -> dict[str, Any]:
+    question = message.strip() or "(see attached image(s))"
+    text = (
+        f"Answer mode: {mode_label}{depth_note}\n"
+        f"Question: {question}\n\nRetrieved material:\n"
+        f"{context or 'No relevant material was retrieved.'}"
+    )
+    if not images:
+        return {"role": "user", "content": text}
+    parts: list[dict[str, Any]] = [{"type": "input_text", "text": text}]
+    for image in images:
+        parts.append({"type": "input_image", "image_url": image})
+    return {"role": "user", "content": parts}
 
 
 async def answer(
@@ -123,7 +293,13 @@ async def answer(
     *,
     history: list[dict[str, str]] | None = None,
     memories: list[str] | None = None,
-) -> tuple[str, str, GateResult, list[dict[str, Any]]]:
+    answer_mode: AnswerMode = "auto",
+    teach_depth: TeachDepth = "full",
+    images: list[str] | None = None,
+    status_emitter: StatusEmitter | None = None,
+) -> tuple[str, ResolvedMode | str, GateResult, list[dict[str, Any]]]:
+    search_query = message.strip() or "number theory mathematics"
+    resolved_mode = resolve_answer_mode(search_query, answer_mode)
     if not settings.openai_api_key:
         gate = GateResult(
             level="retrieval_only",
@@ -133,7 +309,9 @@ async def answer(
         return retrieval_answer(hits), "retrieval", gate, []
 
     context = "\n\n---\n\n".join(hit["content"] for hit in hits)
-    instructions = SYSTEM_PROMPT + format_memory_block(memories or [])
+    instructions = system_prompt_for(resolved_mode, teach_depth) + format_memory_block(
+        memories or []
+    )
     client = AsyncOpenAI(
         api_key=settings.openai_api_key,
         base_url=settings.openai_base_url,
@@ -145,25 +323,34 @@ async def answer(
         content = turn.get("content", "").strip()
         if role in {"user", "assistant"} and content:
             input_items.append({"role": role, "content": content})
+    mode_label = {
+        "teach": "teaching",
+        "solve": "problem-solving",
+        "research": "research",
+    }[resolved_mode]
+    depth_note = f"\nDepth: {teach_depth}" if resolved_mode in {"teach", "solve"} else ""
     input_items.append(
-        {
-            "role": "user",
-            "content": (
-                f"Question: {message}\n\nRetrieved material:\n"
-                f"{context or 'No relevant material was retrieved.'}"
-            ),
-        }
+        build_user_turn(
+            message,
+            mode_label=mode_label,
+            depth_note=depth_note,
+            context=context,
+            images=images,
+        )
     )
 
+    tools = tools_for(resolved_mode)
+    await emit_status(status_emitter, "thinking")
     response = await client.responses.create(
         model=settings.openai_model,
         instructions=instructions,
         input=input_items,
-        tools=TOOLS,
+        tools=tools,
     )
 
     tool_results: list[dict[str, Any]] = []
-    for _ in range(3):
+    max_tool_rounds = 5 if resolved_mode == "research" else 4
+    for _ in range(max_tool_rounds):
         calls = [item for item in response.output if item.type == "function_call"]
         if not calls:
             break
@@ -173,6 +360,7 @@ async def answer(
                 arguments = json.loads(call.arguments)
             except json.JSONDecodeError:
                 arguments = {}
+            await emit_status(status_emitter, "tool", call.name)
             result = await _execute_tool(call.name, arguments)
             tool_results.append(result)
             outputs.append(
@@ -187,18 +375,29 @@ async def answer(
             instructions=instructions,
             previous_response_id=response.id,
             input=outputs,
-            tools=TOOLS,
+            tools=tools,
         )
+        if calls:
+            await emit_status(status_emitter, "thinking")
 
     content = response.output_text or ""
-    lean_code = next(
-        (
-            item.get("code")
-            for item in tool_results
-            if item.get("tool") == "lean_verify" and item.get("ok") and item.get("code")
-        ),
-        None,
-    )
-    gate = await gate_answer(message, content, tool_results, lean_code=lean_code)
+    structure_notes: list[str] = []
+    if resolved_mode == "research":
+        await emit_status(status_emitter, "structuring")
+        content, structure_notes = enforce_research_structure(content)
+
+    # V4 is produced in the Lean workbench, not via chat tool calls.
+    await emit_status(status_emitter, "gating")
+    gate = await gate_answer(search_query, content, tool_results, lean_code=None)
+    if structure_notes:
+        gate.notes = list(dict.fromkeys([*structure_notes, *gate.notes]))
+        if gate.level not in {"retrieval_only", "V0"} and structure_notes:
+            # Incomplete research outline must not claim high confidence.
+            gate.level = "V0"
+            gate.label = "V0 · model-generated, unverified"
+            gate.answer_prefix = (
+                "[Correctness gate] Research sections incomplete; "
+                "do not treat the content below as a verified survey.\n\n"
+            )
     final = f"{gate.answer_prefix}{content}" if gate.answer_prefix else content
-    return final, "openai", gate, tool_results
+    return final, resolved_mode, gate, tool_results

@@ -11,3 +11,5 @@ node_modules/
 .next/
 *.tsbuildinfo
 data/
+corpus_audit.md 
+architecture_roadmap.txt

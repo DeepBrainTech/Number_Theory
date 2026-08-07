@@ -28,11 +28,82 @@ GLOSSARY = {
     "可逆元": "invertible element unit modulo",
     "互素": "coprime relatively prime",
     "环": "ring",
+    "多项式": "polynomial ring F[X]",
+    "多项式环": "polynomial ring",
+    "首一": "monic polynomial",
+    "首项系数": "leading coefficient",
+    "次数": "degree of polynomial",
+    "不可约": "irreducible polynomial",
+    "唯一分解整环": "unique factorization domain UFD",
+    "整环": "integral domain",
+    "长除法": "polynomial long division",
+    "最高公因式": "highest common factor polynomial gcd",
+    "费马小定理": "Fermat little theorem",
+    "欧拉函数": "Euler totient phi",
+    "原根": "primitive root",
+    "二次互反": "quadratic reciprocity",
+    "勒让德": "Legendre symbol",
+    "p进": "p-adic",
+    "亨泽尔": "Hensel lemma",
+    "丢番图": "Diophantine equation",
+    "佩尔方程": "Pell equation",
+    "连分数": "continued fraction",
+    "黎曼zeta": "Riemann zeta function",
+    "狄利克雷": "Dirichlet L-function character",
+    "筛法": "sieve method",
+    "椭圆曲线": "elliptic curve",
 }
+
+
+# Math symbols and LaTeX commands normalized into searchable English words,
+# so that formula-style queries hit prose-style textbook chunks.
+SYMBOL_MAP: dict[str, str] = {
+    "≡": "congruent modulo congruence",
+    "\\equiv": "congruent modulo congruence",
+    "\\pmod": "modulo congruence",
+    "\\bmod": "modulo",
+    "\\mod": "modulo",
+    "∣": "divides divisibility",
+    "\\mid": "divides divisibility",
+    "\\nmid": "does not divide",
+    "\\gcd": "greatest common divisor gcd",
+    "φ": "euler phi totient",
+    "\\varphi": "euler phi totient",
+    "\\phi": "euler phi totient",
+    "ζ": "zeta function",
+    "\\zeta": "zeta function",
+    "\\sigma": "sigma divisor function",
+    "\\tau": "tau number of divisors",
+    "\\mu": "mobius function",
+    "ℤ": "integers ring Z",
+    "\\mathbb{Z}": "integers ring Z",
+    "ℚ": "rational numbers field Q",
+    "\\mathbb{Q}": "rational numbers field Q",
+    "\\mathbb{F}": "finite field",
+    "\\sqrt": "square root",
+    "√": "square root",
+    "\\sum": "sum series",
+    "\\prod": "product",
+    "\\infty": "infinity",
+    "\\legendre": "legendre symbol",
+    "\\binom": "binomial coefficient",
+}
+
+
+def normalize_symbols(text: str) -> str:
+    """Return extra searchable words for math symbols / LaTeX commands in text."""
+    additions: list[str] = []
+    for symbol, words in SYMBOL_MAP.items():
+        if symbol in text and words not in additions:
+            additions.append(words)
+    return " ".join(additions)
 
 
 def expand_query(text: str) -> str:
     additions = [english for chinese, english in GLOSSARY.items() if chinese in text]
+    symbols = normalize_symbols(text)
+    if symbols:
+        additions.append(symbols)
     return " ".join([text, *additions]).strip()
 
 

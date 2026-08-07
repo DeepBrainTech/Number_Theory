@@ -2,146 +2,38 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import re
-import subprocess
-from dataclasses import dataclass
 from pathlib import Path
 
+from .config import settings
 from .db import connection, initialize_database
 from .embedding import MODEL_NAME, as_pgvector, embed_texts
+from .ingestion import (
+    BookSpec,
+    ChapterProfile,
+    book_to_profiles,
+    build_chunks,
+    detect_chapters,
+    get_book,
+    list_books,
+    list_profiles,
+    resolve_profile,
+)
+from .ingestion.catalog import SKIPPED_PDFS
 
 
 DEFAULT_FILENAME = "1017984325-Introduction-to-Number-Theory-2026 (1).pdf"
 
 
-@dataclass
-class Chunk:
-    ordinal: int
-    pdf_page: int
-    printed_page: int
-    section: str | None
-    block_type: str
-    heading: str | None
-    content: str
-
-
-def extract_page(pdf_path: Path, page: int) -> str:
-    result = subprocess.run(
-        [
-            "pdftotext",
-            "-f",
-            str(page),
-            "-l",
-            str(page),
-            "-layout",
-            "-enc",
-            "UTF-8",
-            str(pdf_path),
-            "-",
-        ],
-        check=True,
-        capture_output=True,
-    )
-    return result.stdout.decode("utf-8", errors="replace")
-
-
-def clean_page(text: str) -> str:
-    lines = [line.rstrip() for line in text.replace("\x0c", "").splitlines()]
-    filtered: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        if re.fullmatch(r"\d+", stripped):
-            continue
-        if stripped in {"Introduction to Number Theory", "Euclid’s Algorithm"}:
-            continue
-        filtered.append(line)
-    return "\n".join(filtered).strip()
-
-
-def classify(text: str) -> tuple[str, str | None]:
-    first = next((line.strip() for line in text.splitlines() if line.strip()), "")
-    if re.match(r"^(Theorem|Lemma|Corollary|Proposition)\b", first):
-        return "theorem", first
-    if re.match(r"^Proof\b", first, re.IGNORECASE):
-        return "proof", first
-    example = re.search(r"\bExample\.", text[:500])
-    if example:
-        return "example", text[example.start() :].split(".", 1)[0] + "."
-    if re.match(r"^Exercise\b", first):
-        return "exercise", first
-    if re.match(r"^Definition\b", first) or first.endswith("Axioms."):
-        return "definition", first
-    if "Hints for Some Exercises" in first:
-        return "hint", first
-    return "exposition", None
-
-
-def split_long_paragraph(paragraph: str, max_chars: int = 1800) -> list[str]:
-    if len(paragraph) <= max_chars:
-        return [paragraph]
-    sentences = re.split(r"(?<=[.!?□])\s+(?=[A-Z(])", paragraph)
-    parts: list[str] = []
-    current = ""
-    for sentence in sentences:
-        candidate = f"{current} {sentence}".strip()
-        if current and len(candidate) > max_chars:
-            parts.append(current)
-            current = sentence
-        else:
-            current = candidate
-    if current:
-        parts.append(current)
-    return parts
-
-
-def build_chunks(pdf_path: Path, start_page: int, end_page: int) -> list[Chunk]:
-    chunks: list[Chunk] = []
-    ordinal = 0
-    current_section: str | None = None
-    section_pattern = re.compile(r"^(1\.\d+)\s+(.+)$")
-
-    for pdf_page in range(start_page, end_page + 1):
-        page_text = clean_page(extract_page(pdf_path, pdf_page))
-        paragraphs = [
-            re.sub(r"[ \t]+", " ", paragraph.replace("\n", " ")).strip()
-            for paragraph in re.split(r"\n\s*\n", page_text)
-            if paragraph.strip()
-        ]
-        for paragraph in paragraphs:
-            section_match = section_pattern.match(paragraph)
-            if section_match and len(paragraph) < 140:
-                current_section = f"{section_match.group(1)} {section_match.group(2).title()}"
-                continue
-            if paragraph.startswith("Chapter 1") or paragraph == "Euclid’s Algorithm":
-                continue
-            for part in split_long_paragraph(paragraph):
-                if len(part) < 40:
-                    continue
-                block_type, heading = classify(part)
-                chunks.append(
-                    Chunk(
-                        ordinal=ordinal,
-                        pdf_page=pdf_page,
-                        printed_page=pdf_page - 15,
-                        section=current_section,
-                        block_type=block_type,
-                        heading=heading,
-                        content=part,
-                    )
-                )
-                ordinal += 1
-    return chunks
-
-
-def ingest(pdf_path: Path, start_page: int, end_page: int) -> tuple[str, int]:
+def ingest_profile(pdf_path: Path, profile: ChapterProfile) -> tuple[str, int]:
     resolved = pdf_path.resolve(strict=True)
     if resolved.suffix.lower() != ".pdf":
         raise ValueError("Only PDF files can be ingested")
+
     digest = hashlib.sha256(resolved.read_bytes()).hexdigest()
-    document_id = f"hill-intro-nt-{digest[:12]}-ch1"
-    chunks = build_chunks(resolved, start_page, end_page)
+    document_id = profile.document_id(digest)
+    chunks = build_chunks(resolved, profile)
     if not chunks:
-        raise RuntimeError("No chunks were extracted")
+        raise RuntimeError(f"No chunks were extracted for {profile.key}")
 
     initialize_database()
     texts = [" ".join(filter(None, [chunk.heading, chunk.content])) for chunk in chunks]
@@ -158,11 +50,11 @@ def ingest(pdf_path: Path, start_page: int, end_page: int) -> tuple[str, int]:
             (
                 document_id,
                 resolved.name,
-                "Introduction to Number Theory — Chapter 1: Euclid’s Algorithm",
-                "Richard Michael Hill",
+                profile.document_title,
+                profile.author,
                 digest,
-                start_page,
-                end_page,
+                profile.start_page,
+                profile.end_page,
                 MODEL_NAME,
             ),
         )
@@ -171,38 +63,173 @@ def ingest(pdf_path: Path, start_page: int, end_page: int) -> tuple[str, int]:
                 """
                 INSERT INTO chunks
                     (document_id, ordinal, pdf_page, printed_page, chapter, section,
-                     block_type, heading, content, embedding)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector)
+                     block_type, heading, content, embedding, parent_ordinal)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector, %s)
                 """,
                 (
                     document_id,
                     chunk.ordinal,
                     chunk.pdf_page,
                     chunk.printed_page,
-                    "1 Euclid’s Algorithm",
+                    profile.chapter_label,
                     chunk.section,
                     chunk.block_type,
                     chunk.heading,
                     chunk.content,
                     vector,
+                    chunk.parent_ordinal,
                 ),
             )
         conn.commit()
     return document_id, len(chunks)
 
 
+def resolve_book_profiles(pdf_root: Path, book: BookSpec) -> list[ChapterProfile]:
+    pdf_path = (pdf_root / book.filename).resolve(strict=True)
+    if book.chapters:
+        return book_to_profiles(book)
+    detected = detect_chapters(pdf_path, book)
+    if detected:
+        print(
+            f"  auto-detected {len(detected)} chapters for {book.key}: "
+            + ", ".join(f"{item.number}@{item.start_page}" for item in detected[:12])
+            + ("…" if len(detected) > 12 else "")
+        )
+        return book_to_profiles(book, detected=detected)
+    print(f"  no chapter banners found for {book.key}; ingesting as one body document")
+    return book_to_profiles(book)
+
+
+def ingest_book(pdf_root: Path, book: BookSpec) -> list[tuple[str, int]]:
+    pdf_path = (pdf_root / book.filename).resolve(strict=True)
+    profiles = resolve_book_profiles(pdf_root, book)
+    results: list[tuple[str, int]] = []
+    for profile in profiles:
+        document_id, count = ingest_profile(pdf_path, profile)
+        print(
+            f"Ingested document={document_id} book={book.key} "
+            f"unit={profile.key} chunks={count} quality={book.quality}"
+        )
+        results.append((document_id, count))
+    return results
+
+
+def ingest(pdf_path: Path, start_page: int, end_page: int) -> tuple[str, int]:
+    """Backward-compatible entry point used by older commands/tests."""
+    profile = resolve_profile(profile_key=None, start_page=start_page, end_page=end_page)
+    return ingest_profile(pdf_path, profile)
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Ingest a PDF page range")
-    parser.add_argument("--pdf", type=Path, required=True)
-    parser.add_argument("--start-page", type=int, default=16)
-    parser.add_argument("--end-page", type=int, default=41)
+    parser = argparse.ArgumentParser(description="Ingest approved number-theory PDFs")
+    parser.add_argument("--pdf", type=Path, required=False)
+    parser.add_argument("--pdf-root", type=Path, default=None)
+    parser.add_argument(
+        "--profile",
+        help="Single chapter/body profile key (from --list-profiles)",
+    )
+    parser.add_argument(
+        "--book",
+        choices=[book.key for book in list_books()],
+        help="Ingest one approved book (all chapters)",
+    )
+    parser.add_argument(
+        "--all-approved",
+        action="store_true",
+        help="Ingest every approved book; skip scan/draft/history PDFs",
+    )
+    parser.add_argument("--start-page", type=int, default=None)
+    parser.add_argument("--end-page", type=int, default=None)
+    parser.add_argument("--list-profiles", action="store_true")
+    parser.add_argument("--list-books", action="store_true")
+    parser.add_argument("--list-skipped", action="store_true")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    document_id, count = ingest(args.pdf, args.start_page, args.end_page)
-    print(f"Ingested document={document_id} chunks={count}")
+    pdf_root = (args.pdf_root or settings.pdf_root).resolve()
+
+    if args.list_skipped:
+        for item in SKIPPED_PDFS:
+            print(f"{item.filename}: {item.reason}")
+        return
+
+    if args.list_books:
+        for book in list_books():
+            chapter_info = (
+                f"{len(book.chapters)} fixed chapters"
+                if book.chapters
+                else "auto-detect chapters"
+            )
+            print(
+                f"{book.key}: {book.book_title} · pages {book.body_start}-{book.body_end} · "
+                f"{book.quality}/{book.language} · {chapter_info}"
+            )
+        print("--- skipped ---")
+        for item in SKIPPED_PDFS:
+            print(f"SKIP {item.filename}: {item.reason}")
+        return
+
+    if args.list_profiles:
+        for profile in list_profiles():
+            print(
+                f"{profile.key}: pages {profile.start_page}-{profile.end_page} · "
+                f"{profile.chapter_label}"
+            )
+        return
+
+    if args.all_approved:
+        missing = [
+            book.filename
+            for book in list_books()
+            if not (pdf_root / book.filename).exists()
+        ]
+        if missing:
+            raise SystemExit("Missing PDF files:\n- " + "\n- ".join(missing))
+        total_docs = 0
+        total_chunks = 0
+        for book in list_books():
+            print(f"=== book {book.key} ===")
+            results = ingest_book(pdf_root, book)
+            total_docs += len(results)
+            total_chunks += sum(count for _, count in results)
+        print(f"DONE approved_books={len(list_books())} documents={total_docs} chunks={total_chunks}")
+        print("Skipped files:")
+        for item in SKIPPED_PDFS:
+            present = (pdf_root / item.filename).exists()
+            print(f"  [{'present' if present else 'absent'}] {item.filename}: {item.reason}")
+        return
+
+    if args.book:
+        book = get_book(args.book)
+        ingest_book(pdf_root, book)
+        return
+
+    if args.pdf is None and args.profile is None:
+        raise SystemExit("Provide --all-approved, --book, --profile, or --pdf")
+
+    if args.profile:
+        profile = resolve_profile(
+            profile_key=args.profile,
+            start_page=args.start_page,
+            end_page=args.end_page,
+        )
+        pdf_path = args.pdf or (pdf_root / next(
+            book.filename for book in list_books() if profile.key.startswith(book.key)
+        ))
+        document_id, count = ingest_profile(pdf_path, profile)
+        print(f"Ingested document={document_id} profile={profile.key} chunks={count}")
+        return
+
+    assert args.pdf is not None
+    profile = resolve_profile(
+        profile_key=None,
+        start_page=args.start_page,
+        end_page=args.end_page,
+    )
+    document_id, count = ingest_profile(args.pdf, profile)
+    print(f"Ingested document={document_id} profile={profile.key} chunks={count}")
 
 
 if __name__ == "__main__":

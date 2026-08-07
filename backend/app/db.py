@@ -42,9 +42,12 @@ SCHEMA_STATEMENTS = [
             to_tsvector('english', coalesce(heading, '') || ' ' || content)
         ) STORED,
         embedding VECTOR({DIMENSIONS}) NOT NULL,
+        parent_ordinal INTEGER,
         UNIQUE(document_id, ordinal)
     )
     """,
+    # Lightweight dependency link: proof chunks point at their theorem chunk.
+    "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS parent_ordinal INTEGER",
     "CREATE INDEX IF NOT EXISTS chunks_content_tsv_idx ON chunks USING GIN(content_tsv)",
     "CREATE INDEX IF NOT EXISTS chunks_document_idx ON chunks(document_id, ordinal)",
     """
@@ -82,6 +85,10 @@ SCHEMA_STATEMENTS = [
         ON messages(conversation_id, id)
     """,
     """
+    ALTER TABLE messages
+        ADD COLUMN IF NOT EXISTS attachments JSONB NOT NULL DEFAULT '[]'::jsonb
+    """,
+    """
     CREATE TABLE IF NOT EXISTS user_memories (
         id BIGSERIAL PRIMARY KEY,
         client_id TEXT NOT NULL,
@@ -94,6 +101,40 @@ SCHEMA_STATEMENTS = [
     """
     CREATE INDEX IF NOT EXISTS user_memories_client_idx
         ON user_memories(client_id, updated_at DESC)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS chunk_deps (
+        id BIGSERIAL PRIMARY KEY,
+        source_chunk_id BIGINT NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+        target_chunk_id BIGINT NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+        relation TEXT NOT NULL
+            CHECK (relation IN ('uses_definition', 'uses_lemma', 'uses_theorem', 'proves')),
+        confidence REAL NOT NULL DEFAULT 0.5,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (source_chunk_id, target_chunk_id, relation)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS chunk_deps_source_idx ON chunk_deps(source_chunk_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS chunk_deps_target_idx ON chunk_deps(target_chunk_id)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS notebook_entries (
+        id BIGSERIAL PRIMARY KEY,
+        client_id TEXT NOT NULL,
+        kind TEXT NOT NULL
+            CHECK (kind IN ('experiment', 'conjecture', 'counterexample')),
+        title TEXT NOT NULL,
+        content TEXT NOT NULL,
+        payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS notebook_entries_client_idx
+        ON notebook_entries(client_id, created_at DESC)
     """,
 ]
 

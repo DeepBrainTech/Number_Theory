@@ -106,6 +106,46 @@ async def _structured_audit(
     return data
 
 
+async def _independent_critique(message: str, answer: str) -> tuple[bool, list[str]]:
+    """Second, independent verification route required for V3.
+
+    A separate model call re-derives the problem from scratch and judges whether
+    it reaches the same conclusion as the candidate answer.
+    """
+    client = AsyncOpenAI(
+        api_key=settings.openai_api_key,
+        base_url=settings.openai_base_url,
+    )
+    response = await client.responses.create(
+        model=settings.openai_model,
+        instructions=(
+            "You are an independent verifier for number-theory answers. "
+            "First solve the user's question yourself from scratch, without assuming the "
+            "candidate answer is right. Then compare conclusions and check the candidate for "
+            "missing hypotheses, wrong quantifiers, division-by-zero cases, and counterexamples. "
+            "Output JSON only: "
+            '{"verdict":"agree"|"disagree"|"unsure","issues":[string]}'
+        ),
+        input=json.dumps(
+            {"user_question": message, "candidate_answer": answer[:6000]},
+            ensure_ascii=False,
+        ),
+    )
+    text = (response.output_text or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE | re.DOTALL)
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        raise ValueError("critique payload is not an object")
+    verdict = str(data.get("verdict", "unsure")).lower()
+    issues = [
+        item.strip()
+        for item in data.get("issues") or []
+        if isinstance(item, str) and item.strip()
+    ]
+    return verdict == "agree", issues
+
+
 def _assign_level(
     *,
     premise_ok: bool,
@@ -148,8 +188,13 @@ def _assign_level(
             return "V1", notes, blocked
         return "V0", notes, blocked
 
-    if critic_ok and premise_ok and not sage_ok:
-        notes.append("Premise audit and critique passed; still not a formal proof.")
+    if critic_ok and premise_ok:
+        notes.append(
+            "An independent second derivation reached the same conclusion; "
+            "high-confidence natural-language proof, still not formal."
+        )
+        if sage_ok:
+            notes.append("Concrete instances were also verified exactly by SageMath.")
         return "V3", notes, blocked
 
     if sage_ok:
@@ -204,9 +249,6 @@ async def gate_answer(
         if lean_ok:
             aligned = audit.get("lean_aligned")
             lean_aligned = None if aligned is None else bool(aligned)
-        critic_ok = premise_ok and not conflict and bool(audit.get("notes") is not None)
-        if premise_ok and not conflict and not sage_ok and not lean_ok:
-            critic_ok = True
         for note in audit.get("notes") or []:
             if isinstance(note, str) and note.strip():
                 notes.append(note.strip())
@@ -221,6 +263,22 @@ async def gate_answer(
         critic_ok = False
         if lean_ok:
             lean_aligned = None
+
+    # V3 requires a second, independent derivation. Only attempt it when the
+    # answer is a V3 candidate (premises hold, no conflict, no aligned Lean proof).
+    if premise_ok and not conflict and not lean_ok:
+        try:
+            critic_ok, critique_issues = await _independent_critique(message, answer)
+            if critic_ok:
+                notes.append("Independent verification route agreed with the answer.")
+            else:
+                notes.append(
+                    "Independent verification route did not fully agree; capped below V3."
+                )
+            notes.extend(critique_issues[:4])
+        except Exception as exc:  # noqa: BLE001 - critique must degrade safely
+            critic_ok = False
+            notes.append(f"Independent critique unavailable; capped below V3: {exc}")
 
     level, level_notes, blocked = _assign_level(
         premise_ok=premise_ok,

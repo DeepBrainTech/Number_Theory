@@ -24,6 +24,12 @@ class Settings:
     sage_url: str = os.getenv("SAGE_URL", "http://localhost:8011").rstrip("/")
     lean_url: str = os.getenv("LEAN_URL", "http://localhost:8012").rstrip("/")
     verifier_timeout: float = float(os.getenv("VERIFIER_TIMEOUT", "70"))
+    # Math-concept query expansion via LLM (rule bridges are always on).
+    query_expansion_llm: bool = os.getenv("QUERY_EXPANSION_LLM", "1") == "1"
+    # Listwise LLM reranking of fused retrieval results (heuristic weighting is always on).
+    rerank_llm: bool = os.getenv("RERANK_LLM", "0") == "1"
+    research_tool_timeout: float = float(os.getenv("RESEARCH_TOOL_TIMEOUT", "20"))
+    semantic_scholar_api_key: str = os.getenv("SEMANTIC_SCHOLAR_API_KEY", "")
 
 
 settings = Settings()
