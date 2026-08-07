@@ -362,6 +362,26 @@ export default function Home() {
     setLoading(true);
     setLoadingStatus({ phase: "retrieving" });
     setError("");
+
+    let assistantStarted = false;
+    const ensureAssistant = () => {
+      if (assistantStarted) return;
+      assistantStarted = true;
+      setMessages((current) => [...current, { role: "assistant", content: "" }]);
+    };
+    const patchAssistant = (updater: (content: string) => string) => {
+      setMessages((current) => {
+        const copy = [...current];
+        for (let i = copy.length - 1; i >= 0; i -= 1) {
+          if (copy[i].role === "assistant") {
+            copy[i] = { ...copy[i], content: updater(copy[i].content) };
+            return copy;
+          }
+        }
+        return [...copy, { role: "assistant", content: updater("") }];
+      });
+    };
+
     try {
       const data = await streamChat(
         API_BASE,
@@ -374,20 +394,37 @@ export default function Home() {
           answer_mode: answerMode,
           teach_depth: teachDepth,
         },
-        setLoadingStatus,
+        {
+          onStatus: setLoadingStatus,
+          onDelta: (text) => {
+            ensureAssistant();
+            patchAssistant((content) => content + text);
+          },
+          onReset: () => {
+            if (assistantStarted) patchAssistant(() => "");
+          },
+          onGate: (gate) => {
+            if (typeof gate.answer === "string") {
+              ensureAssistant();
+              patchAssistant(() => gate.answer as string);
+            }
+          },
+        },
       );
       setActiveId(data.conversation_id as string);
-      setMessages((current) => [
-        ...current,
-        {
-          role: "assistant",
-          content: data.answer as string,
-        },
-      ]);
-      await refreshConversations(clientId);
-      if ((data.new_memories as unknown[] | undefined)?.length) {
-        await refreshMemories(clientId);
+      if (assistantStarted) {
+        patchAssistant(() => (data.answer as string) ?? "");
+      } else {
+        setMessages((current) => [
+          ...current,
+          { role: "assistant", content: data.answer as string },
+        ]);
       }
+      await refreshConversations(clientId);
+      // Memories are extracted in the background; refresh shortly after.
+      window.setTimeout(() => {
+        void refreshMemories(clientId);
+      }, 2500);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Unknown error");
     } finally {

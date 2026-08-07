@@ -14,6 +14,13 @@ export type LoadingStatus = {
   detail?: string | null;
 };
 
+export type StreamHandlers = {
+  onStatus?: (status: LoadingStatus) => void;
+  onDelta?: (text: string) => void;
+  onReset?: () => void;
+  onGate?: (gate: Record<string, unknown>) => void;
+};
+
 export function statusLabel(phase: string, detail?: string | null): string {
   switch (phase) {
     case "retrieving":
@@ -49,8 +56,11 @@ export default function ThinkingStatus({ status }: Props) {
 export async function streamChat(
   apiBase: string,
   body: Record<string, unknown>,
-  onStatus: (status: LoadingStatus) => void,
+  handlers: StreamHandlers | ((status: LoadingStatus) => void) = {},
 ): Promise<Record<string, unknown>> {
+  const resolved: StreamHandlers =
+    typeof handlers === "function" ? { onStatus: handlers } : handlers;
+
   const response = await fetch(`${apiBase}/api/chat/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -78,10 +88,24 @@ export async function streamChat(
         type: string;
         phase?: string;
         detail?: string | null;
+        text?: string;
         message?: string;
+        answer?: string;
       };
       if (data.type === "status" && data.phase) {
-        onStatus({ phase: data.phase, detail: data.detail });
+        resolved.onStatus?.({ phase: data.phase, detail: data.detail });
+      }
+      if (data.type === "delta" && typeof data.text === "string") {
+        resolved.onDelta?.(data.text);
+      }
+      if (data.type === "reset") {
+        resolved.onReset?.();
+      }
+      if (data.type === "gate") {
+        resolved.onGate?.(data as Record<string, unknown>);
+        if (payload) {
+          payload = { ...payload, ...data, type: "done" };
+        }
       }
       if (data.type === "error") throw new Error(data.message ?? "Stream failed");
       if (data.type === "done") payload = data as Record<string, unknown>;

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from collections.abc import Awaitable, Callable
@@ -9,7 +10,7 @@ import httpx
 from openai import AsyncOpenAI
 
 from .config import settings
-from .gating import GateResult, gate_answer
+from .gating import LEVEL_LABELS, GateResult, gate_answer
 from .memory import format_memory_block
 from .modes import (
     AnswerMode,
@@ -54,6 +55,8 @@ SAGE_OPERATIONS = [
 
 
 StatusEmitter = Callable[[str, str | None], Awaitable[None]]
+DeltaEmitter = Callable[[str], Awaitable[None]]
+ResetEmitter = Callable[[], Awaitable[None]]
 
 
 async def emit_status(emitter: StatusEmitter | None, phase: str, detail: str | None = None) -> None:
@@ -287,7 +290,93 @@ def build_user_turn(
     return {"role": "user", "content": parts}
 
 
-async def answer(
+def provisional_gate() -> GateResult:
+    return GateResult(
+        level="V0",
+        label=LEVEL_LABELS["V0"],
+        notes=["Verification running in the background…"],
+    )
+
+
+async def _stream_model_response(
+    client: AsyncOpenAI,
+    *,
+    model: str,
+    instructions: str,
+    input_items: list[dict[str, Any]] | list[Any],
+    tools: list[dict[str, Any]],
+    previous_response_id: str | None = None,
+    delta_emitter: DeltaEmitter | None = None,
+) -> Any:
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "instructions": instructions,
+        "input": input_items,
+        "tools": tools,
+        "stream": True,
+    }
+    if previous_response_id:
+        kwargs["previous_response_id"] = previous_response_id
+
+    stream = await client.responses.create(**kwargs)
+    response = None
+    async for event in stream:
+        etype = getattr(event, "type", None)
+        if etype == "response.output_text.delta":
+            delta = getattr(event, "delta", None) or ""
+            if delta and delta_emitter is not None:
+                await delta_emitter(delta)
+        elif etype == "response.completed":
+            response = event.response
+    if response is None:
+        raise RuntimeError("Model stream ended without a completed response")
+    return response
+
+
+async def _run_tool_calls(
+    calls: list[Any],
+    *,
+    status_emitter: StatusEmitter | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    async def _one(call: Any) -> tuple[Any, dict[str, Any]]:
+        try:
+            arguments = json.loads(call.arguments)
+        except json.JSONDecodeError:
+            arguments = {}
+        await emit_status(status_emitter, "tool", call.name)
+        result = await _execute_tool(call.name, arguments)
+        return call, result
+
+    pairs = await asyncio.gather(*[_one(call) for call in calls])
+    tool_results: list[dict[str, Any]] = []
+    outputs: list[dict[str, Any]] = []
+    for call, result in pairs:
+        tool_results.append(result)
+        outputs.append(
+            {
+                "type": "function_call_output",
+                "call_id": call.call_id,
+                "output": json.dumps(result, ensure_ascii=False),
+            }
+        )
+    return tool_results, outputs
+
+
+def _apply_structure_notes(gate: GateResult, structure_notes: list[str]) -> GateResult:
+    if not structure_notes:
+        return gate
+    gate.notes = list(dict.fromkeys([*structure_notes, *gate.notes]))
+    if gate.level not in {"retrieval_only", "V0"}:
+        gate.level = "V0"
+        gate.label = LEVEL_LABELS["V0"]
+        gate.answer_prefix = (
+            "[Correctness gate] Research sections incomplete; "
+            "do not treat the content below as a verified survey.\n\n"
+        )
+    return gate
+
+
+async def generate_answer(
     message: str,
     hits: list[dict],
     *,
@@ -297,16 +386,14 @@ async def answer(
     teach_depth: TeachDepth = "full",
     images: list[str] | None = None,
     status_emitter: StatusEmitter | None = None,
-) -> tuple[str, ResolvedMode | str, GateResult, list[dict[str, Any]]]:
+    delta_emitter: DeltaEmitter | None = None,
+    reset_emitter: ResetEmitter | None = None,
+) -> tuple[str, ResolvedMode | str, list[dict[str, Any]], list[str]]:
+    """Generate the model answer (tools included). Does not run the correctness gate."""
     search_query = message.strip() or "number theory mathematics"
     resolved_mode = resolve_answer_mode(search_query, answer_mode)
     if not settings.openai_api_key:
-        gate = GateResult(
-            level="retrieval_only",
-            label="Retrieval only · no proof generated",
-            notes=["No model API key configured; returning retrieval results only."],
-        )
-        return retrieval_answer(hits), "retrieval", gate, []
+        return retrieval_answer(hits), "retrieval", [], []
 
     context = "\n\n---\n\n".join(hit["content"] for hit in hits)
     instructions = system_prompt_for(resolved_mode, teach_depth) + format_memory_block(
@@ -341,11 +428,13 @@ async def answer(
 
     tools = tools_for(resolved_mode)
     await emit_status(status_emitter, "thinking")
-    response = await client.responses.create(
+    response = await _stream_model_response(
+        client,
         model=settings.openai_model,
         instructions=instructions,
-        input=input_items,
+        input_items=input_items,
         tools=tools,
+        delta_emitter=delta_emitter,
     )
 
     tool_results: list[dict[str, Any]] = []
@@ -354,50 +443,70 @@ async def answer(
         calls = [item for item in response.output if item.type == "function_call"]
         if not calls:
             break
-        outputs = []
-        for call in calls:
-            try:
-                arguments = json.loads(call.arguments)
-            except json.JSONDecodeError:
-                arguments = {}
-            await emit_status(status_emitter, "tool", call.name)
-            result = await _execute_tool(call.name, arguments)
-            tool_results.append(result)
-            outputs.append(
-                {
-                    "type": "function_call_output",
-                    "call_id": call.call_id,
-                    "output": json.dumps(result, ensure_ascii=False),
-                }
-            )
-        response = await client.responses.create(
+        if reset_emitter is not None:
+            await reset_emitter()
+        round_results, outputs = await _run_tool_calls(calls, status_emitter=status_emitter)
+        tool_results.extend(round_results)
+        await emit_status(status_emitter, "thinking")
+        response = await _stream_model_response(
+            client,
             model=settings.openai_model,
             instructions=instructions,
-            previous_response_id=response.id,
-            input=outputs,
+            input_items=outputs,
             tools=tools,
+            previous_response_id=response.id,
+            delta_emitter=delta_emitter,
         )
-        if calls:
-            await emit_status(status_emitter, "thinking")
 
     content = response.output_text or ""
     structure_notes: list[str] = []
     if resolved_mode == "research":
         await emit_status(status_emitter, "structuring")
-        content, structure_notes = enforce_research_structure(content)
+        structured, structure_notes = enforce_research_structure(content)
+        if structured != content:
+            if reset_emitter is not None:
+                await reset_emitter()
+            if delta_emitter is not None:
+                await delta_emitter(structured)
+        content = structured
 
-    # V4 is produced in the Lean workbench, not via chat tool calls.
+    return content, resolved_mode, tool_results, structure_notes
+
+
+async def answer(
+    message: str,
+    hits: list[dict],
+    *,
+    history: list[dict[str, str]] | None = None,
+    memories: list[str] | None = None,
+    answer_mode: AnswerMode = "auto",
+    teach_depth: TeachDepth = "full",
+    images: list[str] | None = None,
+    status_emitter: StatusEmitter | None = None,
+    delta_emitter: DeltaEmitter | None = None,
+    reset_emitter: ResetEmitter | None = None,
+    run_gate: bool = True,
+) -> tuple[str, ResolvedMode | str, GateResult, list[dict[str, Any]]]:
+    content, resolved_mode, tool_results, structure_notes = await generate_answer(
+        message,
+        hits,
+        history=history,
+        memories=memories,
+        answer_mode=answer_mode,
+        teach_depth=teach_depth,
+        images=images,
+        status_emitter=status_emitter,
+        delta_emitter=delta_emitter,
+        reset_emitter=reset_emitter,
+    )
+
+    if not run_gate:
+        gate = _apply_structure_notes(provisional_gate(), structure_notes)
+        return content, resolved_mode, gate, tool_results
+
+    search_query = message.strip() or "number theory mathematics"
     await emit_status(status_emitter, "gating")
     gate = await gate_answer(search_query, content, tool_results, lean_code=None)
-    if structure_notes:
-        gate.notes = list(dict.fromkeys([*structure_notes, *gate.notes]))
-        if gate.level not in {"retrieval_only", "V0"} and structure_notes:
-            # Incomplete research outline must not claim high confidence.
-            gate.level = "V0"
-            gate.label = "V0 · model-generated, unverified"
-            gate.answer_prefix = (
-                "[Correctness gate] Research sections incomplete; "
-                "do not treat the content below as a verified survey.\n\n"
-            )
+    gate = _apply_structure_notes(gate, structure_notes)
     final = f"{gate.answer_prefix}{content}" if gate.answer_prefix else content
     return final, resolved_mode, gate, tool_results

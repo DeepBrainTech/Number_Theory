@@ -145,6 +145,50 @@ def add_message(
     return _normalize_message(dict(row))
 
 
+def update_message(
+    message_id: int,
+    *,
+    content: str | None = None,
+    verification_level: str | None = None,
+    verification_label: str | None = None,
+    verification_notes: list[str] | None = None,
+) -> dict[str, Any]:
+    assignments: list[str] = []
+    values: list[Any] = []
+    if content is not None:
+        assignments.append("content = %s")
+        values.append(content)
+    if verification_level is not None:
+        assignments.append("verification_level = %s")
+        values.append(verification_level)
+    if verification_label is not None:
+        assignments.append("verification_label = %s")
+        values.append(verification_label)
+    if verification_notes is not None:
+        assignments.append("verification_notes = %s::jsonb")
+        values.append(json.dumps(verification_notes, ensure_ascii=False))
+    if not assignments:
+        raise ValueError("No message fields to update")
+    values.append(message_id)
+    with connection() as conn:
+        row = conn.execute(
+            f"""
+            UPDATE messages
+            SET {", ".join(assignments)}
+            WHERE id = %s
+            RETURNING
+                id, conversation_id::text AS conversation_id, role, content, attachments,
+                verification_level, verification_label, verification_notes, tool_results,
+                created_at
+            """,
+            tuple(values),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Message not found")
+        conn.commit()
+    return _normalize_message(dict(row))
+
+
 def list_messages(conversation_id: str, client_id: str) -> list[dict[str, Any]]:
     get_conversation(conversation_id, client_id)
     with connection() as conn:
