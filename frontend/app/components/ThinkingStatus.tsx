@@ -104,7 +104,7 @@ export async function streamChat(
       if (data.type === "gate") {
         resolved.onGate?.(data as Record<string, unknown>);
         if (payload) {
-          payload = { ...payload, ...data, type: "done" };
+          payload = Object.assign({}, payload, data, { type: "done" });
         }
       }
       if (data.type === "error") throw new Error(data.message ?? "Stream failed");
