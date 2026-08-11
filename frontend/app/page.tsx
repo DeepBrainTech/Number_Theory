@@ -4,6 +4,7 @@ import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import ChatComposer from "./components/ChatComposer";
 import ThinkingStatus, { LoadingStatus, streamChat } from "./components/ThinkingStatus";
 import LeanWorkbench from "./components/LeanWorkbench";
+import AutoProve from "./components/AutoProve";
 import ModeDropdown, { ANSWER_MODE_OPTIONS, TEACH_DEPTH_OPTIONS } from "./components/ModeDropdown";
 import MathMarkdown from "./components/MathMarkdown";
 import MemoryPanel from "./components/MemoryPanel";
@@ -60,7 +61,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000"
 const CLIENT_KEY = "nt_client_id";
 
 type AnswerMode = "auto" | "teach" | "solve" | "research";
-type RightView = "chat" | "lean" | "notebook" | "memory";
+type RightView = "chat" | "lean" | "auto-prove" | "notebook" | "memory";
 
 function ensureClientId(): string {
   const existing = window.localStorage.getItem(CLIENT_KEY);
@@ -503,6 +504,14 @@ export default function Home() {
             Lean workbench
           </button>
           <button
+            className={`toolNavItem ${rightView === "auto-prove" ? "active" : ""}`}
+            onClick={() => { setRightView("auto-prove"); setError(""); }}
+            type="button"
+          >
+            <span className="toolNavIcon">∎</span>
+            Auto Prove
+          </button>
+          <button
             className={`toolNavItem ${rightView === "notebook" ? "active" : ""}`}
             onClick={() => {
               setRightView("notebook");
@@ -576,6 +585,11 @@ export default function Home() {
               }}
               onError={setError}
             />
+          </>
+        ) : rightView === "auto-prove" ? (
+          <>
+            {error && <p className="error toolPanelError">{error}</p>}
+            <AutoProve apiBase={API_BASE} modelConfigured={Boolean(tools?.openai.configured)} onError={setError} />
           </>
         ) : rightView === "notebook" ? (
           <>

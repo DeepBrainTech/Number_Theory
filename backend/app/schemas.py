@@ -157,6 +157,29 @@ class FormalizeVerifyResponse(BaseModel):
     error: str | None = None
 
 
+class AutoProveRequest(BaseModel):
+    """A bounded natural-language proof search request.
+
+    This is deliberately separate from chat: proof search makes several model
+    calls and must not inherit an unbounded conversation history.
+    """
+
+    problem: str = Field(min_length=1, max_length=8000)
+    guidance: str = Field(default="", max_length=4000)
+    depth: Literal["quick", "deep"] = "quick"
+    formalize: bool = False
+
+
+class AutoProveResponse(BaseModel):
+    ok: bool
+    proof: str | None = None
+    plan: str | None = None
+    review: list[str] = Field(default_factory=list)
+    revisions: int = 0
+    formalization: dict[str, Any] | None = None
+    error: str | None = None
+
+
 class LatexFromImageRequest(BaseModel):
     image: str = Field(
         min_length=32,

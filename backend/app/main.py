@@ -22,6 +22,7 @@ from .chat import (
 )
 from .config import settings
 from .formalize import generate_proof_draft, propose_statement, verify_statement
+from .auto_prove import run_auto_prove
 from .gating import gate_answer
 from .latex_ocr import image_to_latex
 from .conversations import (
@@ -61,6 +62,8 @@ from .schemas import (
     FormalizeStatementResponse,
     FormalizeVerifyRequest,
     FormalizeVerifyResponse,
+    AutoProveRequest,
+    AutoProveResponse,
     LibraryStats,
     MemoryCreate,
     MemoryOut,
@@ -490,6 +493,47 @@ async def formalize_verify_api(request: FormalizeVerifyRequest) -> FormalizeVeri
         method=request.method,
     )
     return FormalizeVerifyResponse(**result)
+
+
+@app.post("/api/auto-prove", response_model=AutoProveResponse)
+async def auto_prove_api(request: AutoProveRequest) -> AutoProveResponse:
+    result = await run_auto_prove(request.problem, request.guidance, request.depth, request.formalize)
+    return AutoProveResponse(**result)
+
+
+@app.post("/api/auto-prove/stream")
+async def auto_prove_stream_api(request: AutoProveRequest) -> StreamingResponse:
+    async def event_stream():
+        queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+
+        async def emit(phase: str, details: dict[str, Any]) -> None:
+            await queue.put({"type": "status", "phase": phase, **details})
+
+        async def worker() -> None:
+            try:
+                result = await run_auto_prove(
+                    request.problem, request.guidance, request.depth, request.formalize, emit
+                )
+                await queue.put({"type": "result", **result})
+            finally:
+                await queue.put(None)
+
+        task = asyncio.create_task(worker())
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+        finally:
+            if not task.done():
+                task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
 
 
 @app.post("/api/latex/from-image", response_model=LatexFromImageResponse)
