@@ -12,3 +12,4 @@ node_modules/
 data/
 corpus_audit.md 
 architecture_roadmap.txt
+.pnpm-store/

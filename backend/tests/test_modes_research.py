@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 
 from app.chat import collect_hosted_tool_results, tools_for
-from app.modes import enforce_research_structure, validate_research_sections
+from app.modes import enforce_research_structure, resolve_answer_mode, system_prompt_for, validate_research_sections
 from app.research import dedupe_literature, parse_semantic_scholar
 
 
@@ -15,13 +15,23 @@ class ToolsForTests(unittest.TestCase):
             "literature_search",
             "oeis_search",
         }
-        for mode in ("teach", "solve", "research"):
+        for mode in ("teach", "solve", "physics", "research"):
             tools = tools_for(mode)
             names = {tool["name"] for tool in tools if "name" in tool}
             types = {tool["type"] for tool in tools}
             self.assertIn("sage_calculate", names)
             self.assertTrue(literature.issubset(names))
             self.assertIn("web_search", types)
+
+
+class PhysicsModeTests(unittest.TestCase):
+    def test_requested_physics_mode_is_preserved(self) -> None:
+        self.assertEqual(resolve_answer_mode("A block slides down an incline.", "physics"), "physics")
+
+    def test_physics_prompt_requires_units_and_dimensional_checks(self) -> None:
+        prompt = system_prompt_for("physics")
+        self.assertIn("Known quantities & units", prompt)
+        self.assertIn("check dimensions", prompt)
 
 
 class HostedWebSearchTests(unittest.TestCase):

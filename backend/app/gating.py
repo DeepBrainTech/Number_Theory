@@ -86,8 +86,8 @@ async def _structured_audit(
     response = await client.responses.create(
         model=settings.openai_model,
         instructions=(
-            "You are a correctness gate for mathematical answers. Output JSON only, no Markdown. "
-            "Check: 1) premises, domains, and applicability conditions; "
+            "You are a correctness gate for mathematical and physics answers. Output JSON only, no Markdown. "
+            "Check: 1) premises, domains, units, physical assumptions, and applicability conditions; "
             "2) conflicts with tool results; "
             "3) if Lean code is provided, whether its formal statement matches the user's question. "
             "Write notes and summary in English. "
@@ -119,10 +119,11 @@ async def _independent_critique(message: str, answer: str) -> tuple[bool, list[s
     response = await client.responses.create(
         model=settings.openai_model,
         instructions=(
-            "You are an independent verifier for mathematical answers. "
+            "You are an independent verifier for mathematical and physics answers. "
             "First solve the user's question yourself from scratch, without assuming the "
             "candidate answer is right. Then compare conclusions and check the candidate for "
-            "missing hypotheses, wrong quantifiers, division-by-zero cases, and counterexamples. "
+            "missing hypotheses, wrong quantifiers, unit or dimensional mistakes, invalid physical "
+            "assumptions, division-by-zero cases, and counterexamples. "
             "Output JSON only: "
             '{"verdict":"agree"|"disagree"|"unsure","issues":[string]}'
         ),

@@ -1867,8 +1867,28 @@ textarea {
   border-radius: 18px;
   max-width: 420px;
   padding: 36px 32px 32px;
+  position: relative;
   width: 100%;
 }
+
+.loginClose {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 28px;
+  height: 32px;
+  justify-content: center;
+  padding: 0;
+  position: absolute;
+  right: 16px;
+  top: 14px;
+  width: 32px;
+}
+
+.loginClose:hover { color: var(--ink); }
 
 .loginEyebrow {
   color: var(--gold);

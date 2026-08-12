@@ -105,6 +105,11 @@ export const ANSWER_MODE_OPTIONS: DropdownOption[] = [
     description: "Full problem-solving with steps and checks; can look up papers or OEIS when useful.",
   },
   {
+    value: "physics",
+    label: "Physics",
+    description: "Physics problem-solving with model assumptions, units, dimensional checks, and derivations.",
+  },
+  {
     value: "research",
     label: "Research",
     description: "Literature-aware survey with fixed sections for results, evidence, conjectures, and gaps.",

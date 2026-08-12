@@ -26,9 +26,10 @@ declare global {
 
 type Props = {
   onSignedIn: (user: AuthUser) => void;
+  onClose: () => void;
 };
 
-export default function GoogleLogin({ onSignedIn }: Props) {
+export default function GoogleLogin({ onSignedIn, onClose }: Props) {
   const onSignedInRef = useRef(onSignedIn);
   onSignedInRef.current = onSignedIn;
   const buttonRef = useRef<HTMLDivElement>(null);
@@ -88,6 +89,9 @@ export default function GoogleLogin({ onSignedIn }: Props) {
   return (
     <main className="loginScreen">
       <section className="loginCard">
+        <button aria-label="Continue without signing in" className="loginClose" onClick={onClose} type="button">
+          ×
+        </button>
         <p className="loginEyebrow">PROOF LAB</p>
         <h1>Sign in to keep your chats</h1>
         <p className="loginCopy">

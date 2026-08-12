@@ -60,11 +60,12 @@ export async function streamChat(
   apiBase: string,
   body: Record<string, unknown>,
   handlers: StreamHandlers | ((status: LoadingStatus) => void) = {},
+  path = "/api/chat/stream",
 ): Promise<Record<string, unknown>> {
   const resolved: StreamHandlers =
     typeof handlers === "function" ? { onStatus: handlers } : handlers;
 
-  const response = await fetch(apiUrl("/api/chat/stream"), {
+  const response = await fetch(apiUrl(path), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),

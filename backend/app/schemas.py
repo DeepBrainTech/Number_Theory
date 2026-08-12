@@ -22,7 +22,7 @@ class ChatRequest(BaseModel):
     images: list[str] = Field(default_factory=list, max_length=4)
     client_id: str = Field(default="", max_length=64)
     conversation_id: str | None = None
-    answer_mode: Literal["auto", "teach", "solve", "research"] = "auto"
+    answer_mode: Literal["auto", "teach", "solve", "physics", "research"] = "auto"
     teach_depth: Literal["hint", "socratic", "full"] = "full"
 
     @model_validator(mode="after")
@@ -32,10 +32,32 @@ class ChatRequest(BaseModel):
         return self
 
 
+class GuestHistoryMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(max_length=12000)
+
+
+class GuestChatRequest(BaseModel):
+    """A browser-only chat request. It is never written to PostgreSQL."""
+
+    message: str = Field(default="", max_length=4000)
+    images: list[str] = Field(default_factory=list, max_length=4)
+    answer_mode: Literal["auto", "teach", "solve", "physics", "research"] = "auto"
+    teach_depth: Literal["hint", "socratic", "full"] = "full"
+    history: list[GuestHistoryMessage] = Field(default_factory=list, max_length=12)
+    memories: list[str] = Field(default_factory=list, max_length=50)
+
+    @model_validator(mode="after")
+    def require_text_or_images(self) -> GuestChatRequest:
+        if not self.message.strip() and not self.images:
+            raise ValueError("message or images required")
+        return self
+
+
 class ChatResponse(BaseModel):
     answer: str
     mode: str
-    answer_mode: Literal["teach", "solve", "research", "retrieval"]
+    answer_mode: Literal["teach", "solve", "physics", "research", "retrieval"]
     verification: str
     verification_level: str
     verification_label: str

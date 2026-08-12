@@ -11,28 +11,21 @@ import MathMarkdown from "./components/MathMarkdown";
 import MemoryPanel from "./components/MemoryPanel";
 import NotebookPanel from "./components/NotebookPanel";
 import { API_BASE, apiFetch, type AuthUser } from "./lib/api";
+import {
+  loadGuestWorkspace,
+  newGuestId,
+  saveGuestWorkspace,
+  type GuestConversation,
+  type GuestMemory,
+  type GuestMessage,
+  type GuestNotebookEntry,
+} from "./lib/guestStore";
 
-type Message = {
-  id?: number;
-  role: "user" | "assistant";
-  content: string;
-  images?: string[];
-};
+type Message = GuestMessage & { id?: number };
 
-type Conversation = {
-  id: string;
-  title: string;
-  created_at: string;
-  updated_at: string;
-};
+type Conversation = Omit<GuestConversation, "messages">;
 
-type Memory = {
-  id: number;
-  content: string;
-  source_conversation_id?: string | null;
-  created_at: string;
-  updated_at: string;
-};
+type Memory = GuestMemory;
 
 type ToolStatus = {
   openai: { configured: boolean; model: string };
@@ -47,18 +40,11 @@ type LabResult = {
   output: string;
 };
 
-type NotebookEntry = {
-  id: number;
-  kind: "experiment" | "conjecture" | "counterexample";
-  title: string;
-  content: string;
-  payload: Record<string, unknown>;
-  created_at: string;
-};
+type NotebookEntry = GuestNotebookEntry;
 
 type TeachDepth = "hint" | "socratic" | "full";
 
-type AnswerMode = "auto" | "teach" | "solve" | "research";
+type AnswerMode = "auto" | "teach" | "solve" | "physics" | "research";
 type RightView = "chat" | "lean" | "auto-prove" | "notebook" | "memory";
 
 function formatTime(value: string): string {
@@ -78,6 +64,8 @@ function placeholderFor(mode: AnswerMode): string {
   switch (mode) {
     case "solve":
       return "Ask a problem to solve…";
+    case "physics":
+      return "Ask a physics problem…";
     case "teach":
       return "Ask something you'd like to understand…";
     case "research":
@@ -90,6 +78,8 @@ function placeholderFor(mode: AnswerMode): string {
 export default function Home() {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [authReady, setAuthReady] = useState(false);
+  const [guestMode, setGuestMode] = useState(false);
+  const [guestStorageReady, setGuestStorageReady] = useState(false);
   const [tools, setTools] = useState<ToolStatus | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -113,6 +103,16 @@ export default function Home() {
   const [notebook, setNotebook] = useState<NotebookEntry[]>([]);
   const [conjectureDraft, setConjectureDraft] = useState("");
   const composerFormRef = useRef<HTMLFormElement>(null);
+
+  const loadGuestWorkspaceIntoState = useCallback(() => {
+    const workspace = loadGuestWorkspace();
+    setConversations(workspace.conversations.map(({ messages: _messages, ...conversation }) => conversation));
+    setMemories(workspace.memories);
+    setNotebook(workspace.notebook);
+    setActiveId(workspace.conversations[0]?.id ?? null);
+    setMessages(workspace.conversations[0]?.messages ?? []);
+    setGuestStorageReady(true);
+  }, []);
 
   const refreshConversations = useCallback(async () => {
     const response = await apiFetch("/api/conversations");
@@ -181,6 +181,9 @@ export default function Home() {
       .then(async (response) => {
         if (!response.ok) {
           setUser(null);
+          loadGuestWorkspaceIntoState();
+          const toolsResponse = await apiFetch("/api/tools/status");
+          if (toolsResponse.ok) setTools(await toolsResponse.json());
           return;
         }
         setUser((await response.json()) as AuthUser);
@@ -188,10 +191,25 @@ export default function Home() {
       })
       .catch((reason: Error) => setError(reason.message))
       .finally(() => setAuthReady(true));
-  }, [loadWorkspace]);
+  }, [loadGuestWorkspaceIntoState, loadWorkspace]);
+
+  useEffect(() => {
+    if (!guestMode || user || !guestStorageReady) return;
+    const existing = loadGuestWorkspace();
+    saveGuestWorkspace({
+      conversations: conversations.map((conversation) => ({
+        ...conversation,
+        messages: conversation.id === activeId
+          ? messages
+          : existing.conversations.find((item) => item.id === conversation.id)?.messages ?? [],
+      })),
+      memories,
+      notebook,
+    });
+  }, [activeId, conversations, guestMode, guestStorageReady, memories, messages, notebook, user]);
 
   async function startNewChat() {
-    if (!user || loading) return;
+    if (loading) return;
     setActiveId(null);
     setRightView("chat");
     setMessages([]);
@@ -200,12 +218,29 @@ export default function Home() {
   }
 
   function openChat(conversationId: string) {
-    if (!user) return;
+    if (!user) {
+      const conversation = loadGuestWorkspace().conversations.find((item) => item.id === conversationId);
+      if (!conversation) return;
+      setActiveId(conversation.id);
+      setMessages(conversation.messages);
+      setRightView("chat");
+      return;
+    }
     void loadConversation(conversationId);
   }
 
   async function removeConversation(conversationId: string) {
-    if (!user) return;
+    if (!user) {
+      const workspace = loadGuestWorkspace();
+      const remaining = workspace.conversations.filter((item) => item.id !== conversationId);
+      saveGuestWorkspace({ ...workspace, conversations: remaining });
+      setConversations(remaining.map(({ messages: _messages, ...conversation }) => conversation));
+      if (activeId === conversationId) {
+        setActiveId(remaining[0]?.id ?? null);
+        setMessages(remaining[0]?.messages ?? []);
+      }
+      return;
+    }
     const response = await apiFetch(`/api/conversations/${conversationId}`, { method: "DELETE" });
     if (!response.ok) {
       setError("Failed to delete conversation");
@@ -225,7 +260,13 @@ export default function Home() {
   async function addMemoryManually(event: FormEvent) {
     event.preventDefault();
     const content = memoryDraft.trim();
-    if (!user || !content) return;
+    if (!content) return;
+    if (!user) {
+      const now = new Date().toISOString();
+      setMemories((current) => [{ id: Date.now(), content, created_at: now, updated_at: now }, ...current]);
+      setMemoryDraft("");
+      return;
+    }
     const response = await apiFetch("/api/memories", {
       method: "POST",
       body: JSON.stringify({ content }),
@@ -239,7 +280,10 @@ export default function Home() {
   }
 
   async function removeMemory(memoryId: number) {
-    if (!user) return;
+    if (!user) {
+      setMemories((current) => current.filter((item) => item.id !== memoryId));
+      return;
+    }
     const response = await apiFetch(`/api/memories/${memoryId}`, { method: "DELETE" });
     if (!response.ok) {
       setError("Failed to delete memory");
@@ -254,7 +298,7 @@ export default function Home() {
       .split(",")
       .map((item) => item.trim())
       .filter(Boolean);
-    if (args.length === 0 || labBusy || !user) return;
+    if (args.length === 0 || labBusy) return;
     setLabBusy(true);
     try {
       const response = await apiFetch("/api/tools/sage", {
@@ -270,7 +314,13 @@ export default function Home() {
       setLabResults((current) =>
         [{ operation: labOp, args: args.join(","), ok: Boolean(data.ok), output }, ...current].slice(0, 6),
       );
-      if (data.ok) {
+      if (data.ok && !user) {
+        const now = new Date().toISOString();
+        setNotebook((current) => [{
+          id: Date.now(), kind: "experiment", title: `${labOp}(${args.join(",")})`, content: output,
+          payload: { operation: labOp, arguments: args, result: data.result, engine: data.engine }, created_at: now,
+        }, ...current]);
+      } else if (data.ok) {
         await apiFetch("/api/notebook", {
           method: "POST",
           body: JSON.stringify({
@@ -299,7 +349,13 @@ export default function Home() {
   async function saveConjecture(event: FormEvent) {
     event.preventDefault();
     const text = conjectureDraft.trim();
-    if (!user || !text) return;
+    if (!text) return;
+    if (!user) {
+      const now = new Date().toISOString();
+      setNotebook((current) => [{ id: Date.now(), kind: "conjecture", title: text.slice(0, 80), content: text, payload: {}, created_at: now }, ...current]);
+      setConjectureDraft("");
+      return;
+    }
     const response = await apiFetch("/api/notebook", {
       method: "POST",
       body: JSON.stringify({
@@ -318,7 +374,10 @@ export default function Home() {
   }
 
   async function removeNotebookEntry(entryId: number) {
-    if (!user) return;
+    if (!user) {
+      setNotebook((current) => current.filter((item) => item.id !== entryId));
+      return;
+    }
     const response = await apiFetch(`/api/notebook/${entryId}`, { method: "DELETE" });
     if (!response.ok) {
       setError("Failed to delete notebook entry");
@@ -331,7 +390,15 @@ export default function Home() {
     event.preventDefault();
     const question = input.trim();
     const images = [...pendingImages];
-    if ((!question && images.length === 0) || loading || !user) return;
+    if ((!question && images.length === 0) || loading) return;
+
+    let guestConversationId = activeId;
+    if (!user && !guestConversationId) {
+      const now = new Date().toISOString();
+      guestConversationId = newGuestId();
+      setActiveId(guestConversationId);
+      setConversations((current) => [{ id: guestConversationId!, title: question.slice(0, 80) || "Image chat", created_at: now, updated_at: now }, ...current]);
+    }
 
     setMessages((current) => [
       ...current,
@@ -371,6 +438,7 @@ export default function Home() {
           conversation_id: activeId,
           answer_mode: answerMode,
           teach_depth: teachDepth,
+          ...(user ? {} : { history: messages, memories: memories.map((memory) => memory.content) }),
         },
         {
           onStatus: setLoadingStatus,
@@ -388,8 +456,9 @@ export default function Home() {
             }
           },
         },
+        user ? "/api/chat/stream" : "/api/chat/guest/stream",
       );
-      setActiveId(data.conversation_id as string);
+      if (user) setActiveId(data.conversation_id as string);
       if (assistantStarted) {
         patchAssistant(() => (data.answer as string) ?? "");
       } else {
@@ -398,11 +467,13 @@ export default function Home() {
           { role: "assistant", content: data.answer as string },
         ]);
       }
-      await refreshConversations();
-      // Memories are extracted in the background; refresh shortly after.
-      window.setTimeout(() => {
-        void refreshMemories();
-      }, 2500);
+      if (user) {
+        await refreshConversations();
+        window.setTimeout(() => { void refreshMemories(); }, 2500);
+      } else if (guestConversationId) {
+        const now = new Date().toISOString();
+        setConversations((current) => current.map((item) => item.id === guestConversationId ? { ...item, updated_at: now } : item));
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Unknown error");
     } finally {
@@ -418,7 +489,7 @@ export default function Home() {
       {error && <p className="error">{error}</p>}
       <form className="composer" onSubmit={submit} ref={composerFormRef}>
         <ChatComposer
-          disabled={loading || !user}
+          disabled={loading}
           images={pendingImages}
           onChange={setInput}
           onEnterSubmit={() => composerFormRef.current?.requestSubmit()}
@@ -446,7 +517,7 @@ export default function Home() {
             )}
           </div>
           <button
-            disabled={loading || (!input.trim() && pendingImages.length === 0) || !user}
+            disabled={loading || (!input.trim() && pendingImages.length === 0)}
             type="submit"
           >
             Ask
@@ -465,6 +536,8 @@ export default function Home() {
     setNotebook([]);
     setActiveId(null);
     setTools(null);
+    setGuestMode(true);
+    loadGuestWorkspaceIntoState();
   }
 
   if (!authReady) {
@@ -474,14 +547,16 @@ export default function Home() {
       </main>
     );
   }
-  if (!user) {
+  if (!user && !guestMode) {
     return (
       <GoogleLogin
         onSignedIn={async (next) => {
           setUser(next);
+          setGuestMode(false);
           setError("");
           await loadWorkspace();
         }}
+        onClose={() => setGuestMode(true)}
       />
     );
   }
@@ -577,18 +652,18 @@ export default function Home() {
           </div>
         </section>
         <div className="sidebarFooter accountFooter">
-          {user.picture ? (
+          {user?.picture ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img alt="" className="accountAvatar" src={user.picture} />
           ) : (
-            <span className="accountAvatarFallback">{(user.name || user.email || "?").slice(0, 1)}</span>
+            <span className="accountAvatarFallback">{(user?.name || user?.email || "G").slice(0, 1)}</span>
           )}
           <div className="accountMeta">
-            <span className="accountName">{user.name || user.email || "Signed in"}</span>
-            {user.email && user.name ? <span className="accountEmail">{user.email}</span> : null}
+            <span className="accountName">{user ? user.name || user.email || "Signed in" : "Guest mode"}</span>
+            {user?.email && user.name ? <span className="accountEmail">{user.email}</span> : <span className="accountEmail">Saved in this browser</span>}
           </div>
-          <button className="accountSignOut" onClick={() => void signOut()} type="button">
-            Sign out
+          <button className="accountSignOut" onClick={() => user ? void signOut() : setGuestMode(false)} type="button">
+            {user ? "Sign out" : "Sign in"}
           </button>
         </div>
       </aside>

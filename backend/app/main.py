@@ -57,6 +57,7 @@ from .memory import (
 from .notebook import create_entry, delete_entry, export_notebook, list_entries
 from .schemas import (
     ChatRequest,
+    GuestChatRequest,
     ChatResponse,
     ConversationCreate,
     ConversationOut,
@@ -239,7 +240,7 @@ def _chat_response(
     teach_depth: str,
     new_memories: list[dict[str, Any]] | None = None,
 ) -> ChatResponse:
-    answer_mode = mode if mode in {"teach", "solve", "research", "retrieval"} else "teach"
+    answer_mode = mode if mode in {"teach", "solve", "physics", "research", "retrieval"} else "teach"
     return ChatResponse(
         answer=content,
         mode=mode,
@@ -571,6 +572,71 @@ async def auto_prove_stream_api(
             # Closing a browser tab must not throw away a potentially long
             # research run. Its checkpoint and artifacts remain queryable.
             pass
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+
+
+@app.post("/api/chat/guest/stream")
+async def guest_chat_stream_api(request: GuestChatRequest) -> StreamingResponse:
+    """Run a chat for a guest without creating conversations, messages, or memories in the database."""
+
+    async def event_stream():
+        queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+
+        async def emit(event: dict[str, Any]) -> None:
+            await queue.put(event)
+
+        async def on_status(phase: str, detail: str | None = None) -> None:
+            await emit({"type": "status", "phase": phase, "detail": detail})
+
+        async def on_delta(text: str) -> None:
+            await emit({"type": "delta", "text": text})
+
+        async def on_reset() -> None:
+            await emit({"type": "reset"})
+
+        async def worker() -> None:
+            try:
+                content, mode, tool_results, structure_notes = await generate_answer(
+                    request.message.strip(),
+                    history=[item.model_dump() for item in request.history],
+                    memories=request.memories,
+                    answer_mode=request.answer_mode,
+                    teach_depth=request.teach_depth,
+                    images=validate_images(request.images) or None,
+                    status_emitter=on_status,
+                    delta_emitter=on_delta,
+                    reset_emitter=on_reset,
+                )
+                gate = _apply_structure_notes(provisional_gate(), structure_notes)
+                final_content = f"{gate.answer_prefix}{content}" if gate.answer_prefix else content
+                if final_content != content:
+                    await on_reset()
+                    await on_delta(final_content)
+                await emit(
+                    {
+                        "type": "done",
+                        "answer": final_content,
+                        "mode": mode,
+                        "answer_mode": mode,
+                        "verification": _legacy_verification(gate.level),
+                        "verification_level": gate.level,
+                        "verification_label": gate.label,
+                        "verification_notes": gate.notes,
+                        "tool_results": tool_results,
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001
+                await emit({"type": "error", "message": str(exc)})
+            finally:
+                await queue.put(None)
+
+        asyncio.create_task(worker())
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
 

@@ -4,8 +4,8 @@ import re
 from datetime import date
 from typing import Literal
 
-AnswerMode = Literal["auto", "teach", "solve", "research"]
-ResolvedMode = Literal["teach", "solve", "research"]
+AnswerMode = Literal["auto", "teach", "solve", "physics", "research"]
+ResolvedMode = Literal["teach", "solve", "physics", "research"]
 TeachDepth = Literal["hint", "socratic", "full"]
 
 RESEARCH_REQUIRED_HEADINGS = (
@@ -65,6 +65,23 @@ Solving rules:
 - Do not hide critical steps; every non-obvious inference should be justified.
 - If the claim is false, provide a counterexample when feasible.
 - Separate known theorems from calculations and from unverified speculation."""
+
+PHYSICS_PROMPT = f"""You are a rigorous physics problem-solving assistant.
+{COMMON_RULES}
+Physics-solving template (adapt to the question; omit empty sections):
+1. Model & assumptions — state the physical system, coordinate/sign convention, reference frame, and approximations. Do not silently assume away friction, air resistance, relativity, quantum effects, or ideal components.
+2. Known quantities & units — list givens, unknowns, symbols, and the unit system. Convert units before substituting numbers.
+3. Governing principles — name and write the applicable laws (for example Newton's laws, conservation laws, Maxwell equations, thermodynamic identities, or Schrödinger equation) with their conditions of validity.
+4. Derivation — derive the requested relation step by step before numerical substitution whenever feasible.
+5. Calculation & checks — retain units in every numerical result; check dimensions, signs, limiting cases, and sensible significant figures. Use Sage for exact algebra or arithmetic where it is helpful.
+6. Final answer — give a concise boxed result with units, and state any approximation that materially affects it.
+
+Physics rules:
+- Distinguish measured facts, definitions, model assumptions, and derived conclusions.
+- If the question is underspecified, identify the missing physical information and either ask for it or give a clearly labelled conditional result.
+- Never report a numerical answer without a unit when the quantity is dimensional.
+- For diagrams or image-based questions, explain the inferred geometry and sign convention before solving.
+- Lean formalization is generally suited only to mathematical subclaims; do not imply that it validates an experimental model or physical approximation."""
 
 RESEARCH_PROMPT = f"""You are a rigorous mathematics research assistant in research mode.
 {COMMON_RULES}
@@ -128,7 +145,7 @@ _TEACH_PATTERNS = re.compile(
 
 
 def resolve_answer_mode(message: str, requested: AnswerMode = "auto") -> ResolvedMode:
-    if requested in {"teach", "solve", "research"}:
+    if requested in {"teach", "solve", "physics", "research"}:
         return requested
     if _RESEARCH_PATTERNS.search(message):
         return "research"
@@ -154,8 +171,8 @@ def system_prompt_for(mode: ResolvedMode, teach_depth: TeachDepth = "full") -> s
     date_ctx = _date_context()
     if mode == "research":
         return RESEARCH_PROMPT + date_ctx
-    base = TEACH_PROMPT if mode == "teach" else SOLVE_PROMPT
-    if mode == "teach" or teach_depth != "full":
+    base = TEACH_PROMPT if mode == "teach" else PHYSICS_PROMPT if mode == "physics" else SOLVE_PROMPT
+    if mode in {"teach", "physics"} or teach_depth != "full":
         return base + DEPTH_INSTRUCTIONS.get(teach_depth, "") + date_ctx
     return base + date_ctx
 

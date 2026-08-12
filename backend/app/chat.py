@@ -448,9 +448,10 @@ async def generate_answer(
     mode_label = {
         "teach": "teaching",
         "solve": "problem-solving",
+        "physics": "physics problem-solving",
         "research": "research",
     }[resolved_mode]
-    depth_note = f"\nDepth: {teach_depth}" if resolved_mode in {"teach", "solve"} else ""
+    depth_note = f"\nDepth: {teach_depth}" if resolved_mode in {"teach", "solve", "physics"} else ""
     input_items.append(
         build_user_turn(
             message,
