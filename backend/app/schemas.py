@@ -191,6 +191,24 @@ class AutoProveGuidanceRequest(BaseModel):
     guidance: str = Field(min_length=1, max_length=4000)
 
 
+class AutoProveRunOut(BaseModel):
+    run_id: str
+    problem: str
+    guidance: str = ""
+    depth: str = "quick"
+    formalize: bool = False
+    status: str
+    phase: str = ""
+    difficulty: str | None = None
+    passed: bool | None = None
+    proof_attempts: int = 0
+    revisions: int = 0
+    decompositions: int = 0
+    error: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
 class AutoProveResponse(BaseModel):
     ok: bool
     proof: str | None = None

@@ -86,6 +86,30 @@ SCHEMA_STATEMENTS = [
     CREATE INDEX IF NOT EXISTS notebook_entries_client_idx
         ON notebook_entries(client_id, created_at DESC)
     """,
+    """
+    CREATE TABLE IF NOT EXISTS auto_prove_runs (
+        run_id TEXT PRIMARY KEY,
+        client_id TEXT NOT NULL,
+        problem TEXT NOT NULL,
+        guidance TEXT NOT NULL DEFAULT '',
+        depth TEXT NOT NULL DEFAULT 'quick',
+        formalize BOOLEAN NOT NULL DEFAULT FALSE,
+        status TEXT NOT NULL DEFAULT 'running',
+        phase TEXT NOT NULL DEFAULT '',
+        difficulty TEXT,
+        passed BOOLEAN,
+        proof_attempts INT NOT NULL DEFAULT 0,
+        revisions INT NOT NULL DEFAULT 0,
+        decompositions INT NOT NULL DEFAULT 0,
+        error TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS auto_prove_runs_client_idx
+        ON auto_prove_runs(client_id, updated_at DESC)
+    """,
 ]
 
 

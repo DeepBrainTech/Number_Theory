@@ -30,6 +30,7 @@ from .auth import (
 from .config import settings
 from .formalize import generate_proof_draft, propose_statement, verify_statement
 from .auto_prove import add_human_guidance, run_artifacts, run_auto_prove
+from .prove_runs import get_run, list_runs, owned_run_id
 from .gating import gate_answer
 from .latex_ocr import image_to_latex
 from .conversations import (
@@ -72,6 +73,7 @@ from .schemas import (
     AutoProveGuidanceRequest,
     AutoProveRequest,
     AutoProveResponse,
+    AutoProveRunOut,
     GoogleAuthRequest,
     UserOut,
     MemoryCreate,
@@ -508,23 +510,51 @@ async def formalize_verify_api(
 _active_auto_prove_tasks: set[asyncio.Task[Any]] = set()
 
 
+def _serialize_run(row: dict[str, Any]) -> AutoProveRunOut:
+    return AutoProveRunOut(
+        run_id=row["run_id"],
+        problem=row["problem"],
+        guidance=row.get("guidance") or "",
+        depth=row.get("depth") or "quick",
+        formalize=bool(row.get("formalize")),
+        status=row["status"],
+        phase=row.get("phase") or "",
+        difficulty=row.get("difficulty"),
+        passed=row.get("passed"),
+        proof_attempts=int(row.get("proof_attempts") or 0),
+        revisions=int(row.get("revisions") or 0),
+        decompositions=int(row.get("decompositions") or 0),
+        error=row.get("error"),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+@app.get("/api/auto-prove/runs", response_model=list[AutoProveRunOut])
+def auto_prove_runs_list(user: dict[str, Any] = Depends(current_user)) -> list[AutoProveRunOut]:
+    return [_serialize_run(row) for row in list_runs(user["id"])]
+
+
 @app.get("/api/auto-prove/runs/{run_id}")
 async def auto_prove_run_api(
     run_id: str,
-    _user: dict[str, Any] = Depends(current_user),
+    user: dict[str, Any] = Depends(current_user),
 ) -> dict[str, Any]:
-    report = run_artifacts(run_id)
-    if report is None:
+    meta = get_run(run_id, user["id"])
+    if meta is None:
         raise HTTPException(status_code=404, detail="Auto Prove run not found")
-    return report
+    report = run_artifacts(run_id) or {"run_id": run_id, "files": []}
+    return {**report, "meta": _serialize_run(meta).model_dump(mode="json")}
 
 
 @app.post("/api/auto-prove/runs/{run_id}/guidance")
 async def auto_prove_guidance_api(
     run_id: str,
     request: AutoProveGuidanceRequest,
-    _user: dict[str, Any] = Depends(current_user),
+    user: dict[str, Any] = Depends(current_user),
 ) -> dict[str, bool]:
+    if not owned_run_id(run_id, user["id"]):
+        raise HTTPException(status_code=404, detail="Auto Prove run not found")
     if not add_human_guidance(run_id, request.guidance):
         raise HTTPException(status_code=404, detail="Auto Prove run not found")
     return {"ok": True}
@@ -533,17 +563,31 @@ async def auto_prove_guidance_api(
 @app.post("/api/auto-prove", response_model=AutoProveResponse)
 async def auto_prove_api(
     request: AutoProveRequest,
-    _user: dict[str, Any] = Depends(current_user),
+    user: dict[str, Any] = Depends(current_user),
 ) -> AutoProveResponse:
-    result = await run_auto_prove(request.problem, request.guidance, request.depth, request.formalize, run_id=request.run_id, resume=request.resume)
+    if request.resume and request.run_id and not owned_run_id(request.run_id, user["id"]):
+        raise HTTPException(status_code=404, detail="Auto Prove run not found")
+    result = await run_auto_prove(
+        request.problem,
+        request.guidance,
+        request.depth,
+        request.formalize,
+        run_id=request.run_id,
+        resume=request.resume,
+        owner_id=user["id"],
+    )
     return AutoProveResponse(**result)
 
 
 @app.post("/api/auto-prove/stream")
 async def auto_prove_stream_api(
     request: AutoProveRequest,
-    _user: dict[str, Any] = Depends(current_user),
+    user: dict[str, Any] = Depends(current_user),
 ) -> StreamingResponse:
+    if request.resume and request.run_id and not owned_run_id(request.run_id, user["id"]):
+        raise HTTPException(status_code=404, detail="Auto Prove run not found")
+    owner_id = user["id"]
+
     async def event_stream():
         queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
 
@@ -553,7 +597,14 @@ async def auto_prove_stream_api(
         async def worker() -> None:
             try:
                 result = await run_auto_prove(
-                    request.problem, request.guidance, request.depth, request.formalize, emit, request.run_id, request.resume
+                    request.problem,
+                    request.guidance,
+                    request.depth,
+                    request.formalize,
+                    emit,
+                    request.run_id,
+                    request.resume,
+                    owner_id=owner_id,
                 )
                 await queue.put({"type": "result", **result})
             finally:

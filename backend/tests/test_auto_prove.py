@@ -8,6 +8,7 @@ from app.auto_prove import (
     RunStore,
     _parse_review,
     clamp_decision,
+    extract_easy_proof,
     extract_section,
     extract_yaml,
     parse_difficulty,
@@ -62,6 +63,22 @@ class ParseHelpersTests(unittest.TestCase):
         text = "# Related Work\n\nTheorem A.\n\n# Easy Proof\n\nLet n be given.\n"
         self.assertEqual(extract_section(text, "Related Work"), "Theorem A.")
         self.assertEqual(extract_section(text, "Easy Proof"), "Let n be given.")
+
+    def test_extract_easy_proof_prefers_heading(self) -> None:
+        text = (
+            "# Difficulty Evaluation\n\n## Classification: Easy\n\n"
+            "# Easy Proof\n\n# 证明\n\nLet a=b=c=1/3.\n"
+        )
+        self.assertIn("Let a=b=c=1/3.", extract_easy_proof(text))
+
+    def test_extract_easy_proof_accepts_proof_file_heading(self) -> None:
+        text = (
+            "## Classification: Easy\n\n"
+            "## `proof_file`\n\n# 证明\n\nBecause a+b+c=1, done.\n"
+        )
+        proof = extract_easy_proof(text)
+        self.assertIn("Because a+b+c=1", proof)
+        self.assertIn("# 证明", proof)
 
     def test_extract_yaml_fence(self) -> None:
         text = "Here is the plan:\n```yaml\nsteps: []\n```\n"

@@ -154,8 +154,30 @@ def run_artifacts(run_id: str) -> dict[str, Any] | None:
         for path in store.root.rglob("*")
         if path.is_file()
     )
-    result = store.read("result.json")
-    return {"run_id": run_id, "status": store.read("STATUS.md"), "checkpoint": store.read("checkpoint.json"), "result": json.loads(result) if result else None, "files": files}
+    result_text = store.read("result.json")
+    result = json.loads(result_text) if result_text else None
+    proof = store.read("proof.md").strip() or None
+    plan = store.read("plan.yaml").strip() or None
+    related_work = store.read("related_info/related_work.md").strip() or None
+    if related_work == "(none)":
+        related_work = None
+    if result is None and proof:
+        result = {"ok": True, "passed": None, "proof": proof}
+    elif isinstance(result, dict):
+        result = {
+            **result,
+            "proof": proof or result.get("proof"),
+            "plan": plan or result.get("plan"),
+            "related_work": related_work or result.get("related_work"),
+            "review": result.get("review") or [],
+        }
+    return {
+        "run_id": run_id,
+        "status": store.read("STATUS.md"),
+        "checkpoint": store.read("checkpoint.json"),
+        "result": result,
+        "files": files,
+    }
 
 
 def add_human_guidance(run_id: str, guidance: str) -> bool:
@@ -247,6 +269,47 @@ def extract_section(text: str, heading: str) -> str:
     return body.strip()
 
 
+_EASY_PROOF_HEADINGS = (
+    "Easy Proof",
+    "`proof_file`",
+    "proof_file",
+    "Artifact: proof.md",
+    "proof.md",
+)
+_EASY_PROOF_STOP = re.compile(
+    r"^(?:# (?:Difficulty Evaluation|Related Work|Easy Proof)"
+    r"|## `[^`]+`"
+    r"|## Artifact: .+)"
+    r"\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def extract_easy_proof(text: str) -> str:
+    """Pull the Easy short-circuit proof from a survey response.
+
+    Upstream QED writes ``proof.md`` on disk. This service keeps artifacts in
+    the model reply, so agents may emit ``# Easy Proof`` (preferred) or a
+    ``proof_file`` / ``proof.md`` heading. Nested ``# 证明`` titles must not
+    truncate the body the way ``extract_section`` would.
+    """
+    for heading in _EASY_PROOF_HEADINGS:
+        pattern = re.compile(
+            rf"^#{{1,3}} {re.escape(heading)}\s*$",
+            re.IGNORECASE | re.MULTILINE,
+        )
+        match = pattern.search(text)
+        if not match:
+            continue
+        rest = text[match.end() :]
+        stop = _EASY_PROOF_STOP.search(rest)
+        body = rest[: stop.start()] if stop else rest
+        body = body.strip()
+        if body:
+            return body
+    return ""
+
+
 def extract_yaml(text: str) -> str:
     fenced = _YAML_FENCE.search(text)
     if fenced:
@@ -271,8 +334,13 @@ def clamp_decision(
 
 
 def _with_skill(prompt_name: str) -> str:
+    # Literature survey uses the service-adapted prompt so Easy short-circuit
+    # emits a parseable ``# Easy Proof`` section (filesystem writes are gone).
+    if prompt_name == "literature_survey.md":
+        from .prove_prompts import load_prompt
+
+        return skill_text() + "\n\n---\n\n" + load_prompt("literature_survey.md")
     names = {
-        "literature_survey.md": "literature_survey.md",
         "decomposition.md": "decomposition.md",
         "prover.md": "single_prover.md",
     }
@@ -355,6 +423,7 @@ async def run_auto_prove(
     emit: EventEmitter | None = None,
     run_id: str | None = None,
     resume: bool = False,
+    owner_id: str | None = None,
 ) -> dict[str, Any]:
     """Run the QED-style proof loop and return artifacts plus a run directory."""
     if not settings.openai_api_key:
@@ -381,8 +450,24 @@ async def run_auto_prove(
     all_tools = [WEB_SEARCH_TOOL, *BASE_TOOLS, *RESEARCH_TOOLS]
     sage_tools = list(BASE_TOOLS)
 
+    if owner_id and run_id:
+        from .prove_runs import create_run
+
+        create_run(
+            run_id=run_id,
+            client_id=owner_id,
+            problem=problem,
+            guidance=guidance,
+            depth=depth,
+            formalize=formalize,
+        )
+
     async def status(phase: str, **details: Any) -> None:
         store.checkpoint(phase, state)
+        if owner_id and run_id:
+            from .prove_runs import touch_run
+
+            touch_run(run_id, owner_id, status="running", phase=str(details.get("label") or phase))
         if emit:
             await emit(phase, {"run_id": run_id, **details})
         store.log(details.get("label") or phase)
@@ -421,13 +506,17 @@ async def run_auto_prove(
             survey_text = await _ask(_with_skill("literature_survey.md"), {"problem": problem, "guidance": guidance}, tools=all_tools, max_rounds=6, emit=emit)
             difficulty = parse_difficulty(survey_text)
             related_work = extract_section(survey_text, "Related Work")
-            easy_proof = extract_section(survey_text, "Easy Proof")
+            easy_proof = extract_easy_proof(survey_text)
             evaluation = extract_section(survey_text, "Difficulty Evaluation") or survey_text
             store.write("related_info/difficulty_evaluation.md", evaluation or survey_text)
             store.write("related_info/related_work.md", related_work or "(none)")
             store.write("related_info/survey_raw.md", survey_text)
             state.related_work = related_work
             store.log(f"Difficulty classified as {difficulty}")
+            if owner_id and run_id:
+                from .prove_runs import touch_run
+
+                touch_run(run_id, owner_id, difficulty=difficulty)
 
         if difficulty == "easy" and easy_proof.strip():
             await status("proving", label="Easy path: survey agent wrote the proof")
@@ -436,7 +525,7 @@ async def run_auto_prove(
             state.proof_attempts = 1
             store.write("proof.md", state.proof_text)
             store.write("plan.yaml", state.plan)
-            return await _finalize(
+            result = await _finalize(
                 state,
                 store,
                 run_id,
@@ -447,6 +536,21 @@ async def run_auto_prove(
                 related_work=related_work,
                 passed=True,
             )
+            if owner_id and run_id:
+                from .prove_runs import touch_run
+
+                touch_run(
+                    run_id,
+                    owner_id,
+                    status="complete",
+                    phase="complete",
+                    difficulty=difficulty,
+                    passed=True,
+                    proof_attempts=state.proof_attempts,
+                    revisions=state.plan_revisions,
+                    decompositions=state.decompositions,
+                )
+            return result
 
         next_action = "prove" if resuming and state.plan else "decompose"
         passed = False
@@ -729,7 +833,7 @@ async def run_auto_prove(
         )
         store.write("proof_effort_summary.md", summary)
 
-        return await _finalize(
+        result = await _finalize(
             state,
             store,
             run_id,
@@ -740,9 +844,38 @@ async def run_auto_prove(
             related_work=related_work,
             passed=passed,
         )
+        if owner_id and run_id:
+            from .prove_runs import touch_run
+
+            touch_run(
+                run_id,
+                owner_id,
+                status="complete" if result.get("ok") else "failed",
+                phase="complete",
+                difficulty=difficulty,
+                passed=passed,
+                proof_attempts=state.proof_attempts,
+                revisions=state.plan_revisions,
+                decompositions=state.decompositions,
+                error=None if result.get("ok") else str(result.get("error") or "failed"),
+            )
+        return result
     except Exception as exc:  # noqa: BLE001 - API failures must become a client result
         store.log(f"ERROR: {exc}")
         store.write("STATUS.md", f"# Auto Prove Status\n\nFailed: {exc}\n")
+        if owner_id and run_id:
+            from .prove_runs import touch_run
+
+            touch_run(
+                run_id,
+                owner_id,
+                status="failed",
+                phase="failed",
+                proof_attempts=state.proof_attempts,
+                revisions=state.plan_revisions,
+                decompositions=state.decompositions,
+                error=str(exc),
+            )
         return {
             "ok": False,
             "error": f"Auto Prove failed: {exc}",
