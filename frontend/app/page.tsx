@@ -44,7 +44,7 @@ type NotebookEntry = GuestNotebookEntry;
 
 type TeachDepth = "hint" | "socratic" | "full";
 
-type AnswerMode = "auto" | "teach" | "solve" | "physics" | "research";
+type AnswerMode = "auto" | "teach" | "solve" | "research";
 type RightView = "chat" | "lean" | "auto-prove" | "notebook" | "memory";
 
 function formatTime(value: string): string {
@@ -64,8 +64,6 @@ function placeholderFor(mode: AnswerMode): string {
   switch (mode) {
     case "solve":
       return "Ask a problem to solve…";
-    case "physics":
-      return "Ask a physics problem…";
     case "teach":
       return "Ask something you'd like to understand…";
     case "research":

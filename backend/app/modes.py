@@ -129,6 +129,19 @@ _RESEARCH_PATTERNS = re.compile(
     r")\b|文献|研究现状|综述|猜想|开放问题|前沿|最新进展)"
 )
 
+_PHYSICS_PATTERNS = re.compile(
+    r"(?i)(\b(?:"
+    r"physics|mechanics|kinematics|dynamics|newton(?:'s)?\s+law|force|momentum|"
+    r"energy|work|power|friction|incline|projectile|oscillat(?:ion|or)|spring|pendulum|"
+    r"electric(?:ity|\s+field|\s+current|\s+potential)|voltage|resistance|circuit|"
+    r"magnet(?:ic|ism)|electromagnet|capacitor|inductor|wave|frequency|wavelength|"
+    r"optics|refraction|thermodynamics|entropy|temperature|pressure|ideal\s+gas|"
+    r"relativity|quantum|photon|schr(?:ö|o)dinger"
+    r")\b|物理|力学|运动学|动力学|牛顿|速度|加速度|位移|力|动量|能量|功|功率|"
+    r"摩擦|斜面|抛体|弹簧|单摆|电场|电流|电压|电阻|电路|磁场|电磁|电容|电感|"
+    r"波动|频率|波长|光学|折射|热力学|熵|温度|压强|理想气体|相对论|量子|光子)"
+)
+
 _SOLVE_PATTERNS = re.compile(
     r"(?i)(\b(?:"
     r"prove|show\s+that|compute|calculate|find\s+all|solve|"
@@ -149,6 +162,8 @@ def resolve_answer_mode(message: str, requested: AnswerMode = "auto") -> Resolve
         return requested
     if _RESEARCH_PATTERNS.search(message):
         return "research"
+    if _PHYSICS_PATTERNS.search(message):
+        return "physics"
     if _SOLVE_PATTERNS.search(message) and not _TEACH_PATTERNS.search(message):
         return "solve"
     if _TEACH_PATTERNS.search(message) and not _SOLVE_PATTERNS.search(message):

@@ -28,6 +28,9 @@ class PhysicsModeTests(unittest.TestCase):
     def test_requested_physics_mode_is_preserved(self) -> None:
         self.assertEqual(resolve_answer_mode("A block slides down an incline.", "physics"), "physics")
 
+    def test_auto_detects_physics_questions(self) -> None:
+        self.assertEqual(resolve_answer_mode("一个质量为 2 kg 的物体受到恒力后加速度是多少？"), "physics")
+
     def test_physics_prompt_requires_units_and_dimensional_checks(self) -> None:
         prompt = system_prompt_for("physics")
         self.assertIn("Known quantities & units", prompt)
