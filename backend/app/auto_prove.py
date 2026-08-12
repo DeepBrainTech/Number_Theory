@@ -42,6 +42,86 @@ _JSON_BLOCK = re.compile(r"\{[^{}]*\"pass\"[^{}]*\}", re.DOTALL)
 _YAML_FENCE = re.compile(r"```(?:yaml|yml)\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 _HEADING = re.compile(r"^## Classification:\s*(Easy|Medium|Hard)\s*$", re.IGNORECASE | re.MULTILINE)
 _CURRENT_RUN: contextvars.ContextVar[RunStore | None] = contextvars.ContextVar("auto_prove_run", default=None)
+_CANCEL_EVENTS: dict[str, asyncio.Event] = {}
+_ACTIVE_TASKS: dict[str, asyncio.Task[Any]] = {}
+
+
+class AutoProveCancelled(Exception):
+    """Raised when a user cancels an in-flight Auto Prove run."""
+
+
+def request_cancel(run_id: str) -> bool:
+    """Signal cancel for ``run_id`` and cancel its asyncio task if this process owns it."""
+    found = False
+    event = _CANCEL_EVENTS.get(run_id)
+    if event is not None:
+        event.set()
+        found = True
+    task = _ACTIVE_TASKS.get(run_id)
+    current = asyncio.current_task()
+    if task is not None and not task.done() and task is not current:
+        task.cancel()
+        found = True
+    return found
+
+
+def _register_run(run_id: str) -> asyncio.Event:
+    event = _CANCEL_EVENTS.get(run_id)
+    if event is None:
+        event = asyncio.Event()
+        _CANCEL_EVENTS[run_id] = event
+    task = asyncio.current_task()
+    if task is not None:
+        _ACTIVE_TASKS[run_id] = task
+    return event
+
+
+def _unregister_run(run_id: str | None) -> None:
+    if not run_id:
+        return
+    _CANCEL_EVENTS.pop(run_id, None)
+    current = asyncio.current_task()
+    owned = _ACTIVE_TASKS.get(run_id)
+    if owned is None or owned is current or owned.done():
+        _ACTIVE_TASKS.pop(run_id, None)
+
+
+def _ensure_not_cancelled(run_id: str | None = None) -> None:
+    if run_id is None:
+        store = _CURRENT_RUN.get()
+        run_id = store.root.name if store else None
+    if not run_id:
+        return
+    event = _CANCEL_EVENTS.get(run_id)
+    if event is not None and event.is_set():
+        raise AutoProveCancelled()
+
+
+def mark_run_cancelled(run_id: str, store: RunStore | None = None, *, owner_id: str | None = None) -> dict[str, Any]:
+    """Persist cancelled status to disk (and DB when ``owner_id`` is known)."""
+    store = store or open_run_store(run_id)
+    if store:
+        store.log("Cancelled by user")
+        store.write("STATUS.md", f"# Auto Prove Status\n\nCancelled by user\n\n- Updated: {_now()}\n")
+        store.write(
+            "result.json",
+            json.dumps(
+                {"ok": False, "error": "Cancelled by user", "run_id": run_id, "passed": False},
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
+    if owner_id:
+        from .prove_runs import touch_run
+
+        touch_run(run_id, owner_id, status="cancelled", phase="cancelled", error="Cancelled by user")
+    return {
+        "ok": False,
+        "error": "Cancelled by user",
+        "run_id": run_id,
+        "run_dir": str(store.root) if store else None,
+        "passed": False,
+    }
 
 
 def _client() -> AsyncOpenAI:
@@ -359,6 +439,7 @@ async def _ask(
     max_rounds: int,
     emit: EventEmitter | None = None,
 ) -> str:
+    _ensure_not_cancelled()
     run = _CURRENT_RUN.get()
     if run and run.human_guidance():
         payload = {**payload, "human_guidance": run.human_guidance()}
@@ -378,11 +459,13 @@ async def _ask(
         kwargs["tools"] = tools
     response = await client.responses.create(**kwargs)
     for _ in range(max_rounds):
+        _ensure_not_cancelled()
         calls = [item for item in (response.output or []) if getattr(item, "type", None) == "function_call"]
         if not calls:
             break
         outputs: list[dict[str, Any]] = []
         for call in calls:
+            _ensure_not_cancelled()
             try:
                 arguments = json.loads(call.arguments)
             except json.JSONDecodeError:
@@ -446,7 +529,9 @@ async def run_auto_prove(
     else:
         run_id, store = RunStore.create()
         state = LoopState()
+    assert run_id is not None
     run_token = _CURRENT_RUN.set(store)
+    _register_run(run_id)
     all_tools = [WEB_SEARCH_TOOL, *BASE_TOOLS, *RESEARCH_TOOLS]
     sage_tools = list(BASE_TOOLS)
 
@@ -463,6 +548,7 @@ async def run_auto_prove(
         )
 
     async def status(phase: str, **details: Any) -> None:
+        _ensure_not_cancelled(run_id)
         store.checkpoint(phase, state)
         if owner_id and run_id:
             from .prove_runs import touch_run
@@ -471,6 +557,10 @@ async def run_auto_prove(
         if emit:
             await emit(phase, {"run_id": run_id, **details})
         store.log(details.get("label") or phase)
+
+    # Emit run_id immediately so the UI can cancel before the first long model call.
+    if emit:
+        await emit("starting", {"run_id": run_id, "label": "Starting proof workflow"})
 
     def write_status(label: str) -> None:
         store.write(
@@ -860,6 +950,8 @@ async def run_auto_prove(
                 error=None if result.get("ok") else str(result.get("error") or "failed"),
             )
         return result
+    except (AutoProveCancelled, asyncio.CancelledError):
+        return mark_run_cancelled(run_id, store, owner_id=owner_id)
     except Exception as exc:  # noqa: BLE001 - API failures must become a client result
         store.log(f"ERROR: {exc}")
         store.write("STATUS.md", f"# Auto Prove Status\n\nFailed: {exc}\n")
@@ -883,6 +975,7 @@ async def run_auto_prove(
             "run_dir": str(store.root),
         }
     finally:
+        _unregister_run(run_id)
         _CURRENT_RUN.reset(run_token)
 
 

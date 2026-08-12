@@ -29,7 +29,7 @@ from .auth import (
 )
 from .config import settings
 from .formalize import generate_proof_draft, propose_statement, verify_statement
-from .auto_prove import add_human_guidance, run_artifacts, run_auto_prove
+from .auto_prove import add_human_guidance, mark_run_cancelled, request_cancel, run_artifacts, run_auto_prove
 from .prove_runs import get_run, list_runs, owned_run_id
 from .gating import gate_answer
 from .latex_ocr import image_to_latex
@@ -558,6 +558,23 @@ async def auto_prove_guidance_api(
     if not add_human_guidance(run_id, request.guidance):
         raise HTTPException(status_code=404, detail="Auto Prove run not found")
     return {"ok": True}
+
+
+@app.post("/api/auto-prove/runs/{run_id}/cancel")
+async def auto_prove_cancel_api(
+    run_id: str,
+    user: dict[str, Any] = Depends(current_user),
+) -> dict[str, Any]:
+    meta = get_run(run_id, user["id"])
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Auto Prove run not found")
+    if meta["status"] != "running":
+        return {"ok": True, "cancelled": False, "status": meta["status"]}
+    alive = request_cancel(run_id)
+    if not alive:
+        # Worker is gone (e.g. process restart) but DB still says running.
+        mark_run_cancelled(run_id, owner_id=user["id"])
+    return {"ok": True, "cancelled": True, "status": "cancelled"}
 
 
 @app.post("/api/auto-prove", response_model=AutoProveResponse)

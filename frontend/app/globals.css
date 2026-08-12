@@ -681,25 +681,36 @@ textarea {
   overflow: auto;
   padding: 0;
 }
-.autoProveHistory li button {
+.autoProveHistory li {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+.autoProveHistory li > button:first-child {
   background: var(--bg);
   border: 1px solid var(--line);
   border-radius: 10px;
   color: inherit;
   cursor: pointer;
   display: grid;
+  flex: 1;
   gap: 4px;
+  min-width: 0;
   padding: 10px 12px;
   text-align: left;
-  width: 100%;
 }
-.autoProveHistory li button.active,
-.autoProveHistory li button:hover {
+.autoProveHistory li > button:first-child.active,
+.autoProveHistory li > button:first-child:hover {
   border-color: var(--green);
 }
-.autoProveHistory li button:disabled {
+.autoProveHistory li > button:first-child:disabled {
   cursor: not-allowed;
   opacity: .55;
+}
+.autoProveStop {
+  flex-shrink: 0;
+  font-size: 12px;
+  padding: 6px 10px;
 }
 .autoProveHistoryTitle {
   font-size: 13px;

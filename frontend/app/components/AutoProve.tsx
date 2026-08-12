@@ -56,6 +56,7 @@ function statusLabel(run: SavedRun): string {
   if (run.status === "complete" && run.passed) return "Passed";
   if (run.status === "complete" && run.passed === false) return "Finished (not verified)";
   if (run.status === "failed") return "Failed";
+  if (run.status === "cancelled") return "Cancelled";
   if (run.status === "running") return run.phase || "Running";
   return run.status;
 }
@@ -170,7 +171,8 @@ export default function AutoProve({ apiBase, modelConfigured, onError }: Props) 
               setActiveRunId(eventData.run_id);
               void loadArtifacts(eventData.run_id);
             }
-            setStatus(eventData.ok ? "Complete" : "Failed");
+            const cancelled = Boolean(eventData.error?.toLowerCase().includes("cancelled"));
+            setStatus(cancelled ? "Cancelled" : eventData.ok ? "Complete" : "Failed");
             void refreshHistory();
           }
         }
@@ -185,8 +187,16 @@ export default function AutoProve({ apiBase, modelConfigured, onError }: Props) 
     }
   }
 
-  function cancel() {
+  async function cancelRun(runId?: string | null) {
+    const id = runId ?? activeRunId;
+    if (id) {
+      const response = await apiFetch(`/api/auto-prove/runs/${id}/cancel`, { method: "POST" });
+      if (!response.ok) onError?.("Could not cancel Auto Prove run");
+    }
     controller.current?.abort();
+    setStatus("Cancelled");
+    setBusy(false);
+    void refreshHistory();
   }
 
   async function submitResearchNote() {
@@ -200,7 +210,18 @@ export default function AutoProve({ apiBase, modelConfigured, onError }: Props) 
     setStatus("Research guidance saved; it will be used by the next agent call");
   }
 
-  const canResume = Boolean(activeRunId && !busy && (status === "Failed" || savedRuns.find((r) => r.run_id === activeRunId)?.status === "failed"));
+  const activeMeta = savedRuns.find((r) => r.run_id === activeRunId);
+  const canResume = Boolean(
+    activeRunId
+    && !busy
+    && (
+      status === "Failed"
+      || status === "Cancelled"
+      || activeMeta?.status === "failed"
+      || activeMeta?.status === "cancelled"
+    ),
+  );
+  const canStopActive = Boolean(activeRunId && (busy || activeMeta?.status === "running"));
 
   return (
     <section className="autoProve">
@@ -241,6 +262,15 @@ export default function AutoProve({ apiBase, modelConfigured, onError }: Props) 
                     {` · ${run.run_id}`}
                   </span>
                 </button>
+                {run.status === "running" && (
+                  <button
+                    className="ghost autoProveStop"
+                    onClick={() => void cancelRun(run.run_id)}
+                    type="button"
+                  >
+                    Stop
+                  </button>
+                )}
               </li>
             ))}
           </ul>
@@ -255,7 +285,7 @@ export default function AutoProve({ apiBase, modelConfigured, onError }: Props) 
           <span className="autoProveWorkflow">QED workflow · up to 4 proof attempts × 4 plan revisions × 4 rewrites</span>
           <label className="autoProveCheck"><input checked={formalize} disabled={busy} onChange={(e) => setFormalize(e.target.checked)} type="checkbox" /> Attempt Lean formalization</label>
           <button disabled={busy || !problem.trim()} type="submit">{busy ? "Working…" : "Prove"}</button>
-          {busy && <button className="ghost" onClick={cancel} type="button">Cancel</button>}
+          {(busy || canStopActive) && <button className="ghost" onClick={() => void cancelRun()} type="button">Cancel</button>}
         </div>
       </form>
       {status && <p className="autoProveStatus">{status}</p>}

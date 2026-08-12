@@ -4,16 +4,22 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.auto_prove import (
+    AutoProveCancelled,
     LoopState,
     RunStore,
+    _ensure_not_cancelled,
     _parse_review,
+    _register_run,
+    _unregister_run,
     clamp_decision,
     extract_easy_proof,
     extract_section,
     extract_yaml,
+    mark_run_cancelled,
     parse_difficulty,
     parse_regulator_decision,
     parse_verdict,
+    request_cancel,
 )
 from app.prove_prompts import load_prompt, qed_prompt, skill_text
 
@@ -123,6 +129,29 @@ class RunStoreTests(unittest.TestCase):
                 self.assertEqual(store.read("attempt_1/revision_1/proof_1/proof.md").strip(), "QED.")
                 store.log("hello")
                 self.assertIn("hello", (store.root / "log.txt").read_text(encoding="utf-8"))
+
+
+class CancelRegistryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_request_cancel_sets_event_and_raises_on_check(self) -> None:
+        run_id = "abc123def456"
+        _register_run(run_id)
+        try:
+            _ensure_not_cancelled(run_id)
+            self.assertTrue(request_cancel(run_id))
+            with self.assertRaises(AutoProveCancelled):
+                _ensure_not_cancelled(run_id)
+        finally:
+            _unregister_run(run_id)
+
+    async def test_mark_run_cancelled_writes_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("app.auto_prove.settings") as settings:
+                settings.auto_prove_runs_dir = Path(tmp)
+                run_id, store = RunStore.create("abcd1234efef")
+                result = mark_run_cancelled(run_id, store)
+                self.assertFalse(result["ok"])
+                self.assertIn("Cancelled", result["error"])
+                self.assertIn("Cancelled", store.read("STATUS.md"))
 
 
 if __name__ == "__main__":
