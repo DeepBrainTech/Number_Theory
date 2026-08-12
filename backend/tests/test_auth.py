@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from app.auth import read_user_id, sign_user_id
+from app.auth import _cookie_flags, read_user_id, sign_user_id
 
 
 class SessionCookieTests(unittest.TestCase):
@@ -12,6 +12,20 @@ class SessionCookieTests(unittest.TestCase):
     def test_rejects_tampered_token(self) -> None:
         token = sign_user_id("11111111-1111-1111-1111-111111111111")
         self.assertIsNone(read_user_id(token + "x"))
+
+    def test_samesite_none_forces_secure(self) -> None:
+        with patch("app.auth.settings") as settings:
+            settings.cookie_samesite = "none"
+            settings.cookie_secure = False
+            self.assertEqual(_cookie_flags(), ("none", True))
+
+    def test_samesite_lax_respects_secure_flag(self) -> None:
+        with patch("app.auth.settings") as settings:
+            settings.cookie_samesite = "lax"
+            settings.cookie_secure = False
+            self.assertEqual(_cookie_flags(), ("lax", False))
+            settings.cookie_secure = True
+            self.assertEqual(_cookie_flags(), ("lax", True))
 
 
 class GoogleAuthConfigTests(unittest.TestCase):

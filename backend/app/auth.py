@@ -93,20 +93,35 @@ def verify_google_id_token(token: str) -> dict[str, Any]:
     return info
 
 
+def _cookie_flags() -> tuple[str, bool]:
+    """Return (samesite, secure). SameSite=None always implies Secure."""
+    samesite = settings.cookie_samesite if settings.cookie_samesite in {"lax", "strict", "none"} else "lax"
+    secure = settings.cookie_secure or samesite == "none"
+    return samesite, secure
+
+
 def set_session_cookie(response: Response, user_id: str) -> None:
+    samesite, secure = _cookie_flags()
     response.set_cookie(
         COOKIE_NAME,
         sign_user_id(user_id),
         max_age=SESSION_MAX_AGE,
         httponly=True,
-        samesite="lax",
-        secure=settings.cookie_secure,
+        samesite=samesite,  # type: ignore[arg-type]
+        secure=secure,
         path="/",
     )
 
 
 def clear_session_cookie(response: Response) -> None:
-    response.delete_cookie(COOKIE_NAME, path="/")
+    samesite, secure = _cookie_flags()
+    response.delete_cookie(
+        COOKIE_NAME,
+        path="/",
+        secure=secure,
+        httponly=True,
+        samesite=samesite,  # type: ignore[arg-type]
+    )
 
 
 def current_user(request: Request) -> dict[str, Any]:

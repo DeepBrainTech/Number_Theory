@@ -54,9 +54,14 @@ For https://proof-lab.deepbrainacademy.org set:
 ```dotenv
 CORS_ORIGINS=https://proof-lab.deepbrainacademy.org,http://localhost:3000
 COOKIE_SECURE=1
+COOKIE_SAMESITE=none
 GOOGLE_CLIENT_ID=...
 NEXT_PUBLIC_GOOGLE_CLIENT_ID=...
 ```
+
+Set these on the **backend** service. `COOKIE_SAMESITE=none` is required when the
+frontend origin differs from the API host (cross-site cookies); browsers also
+require `COOKIE_SECURE=1` in that mode.
 
 In Google Cloud Console, add authorized JavaScript origins:
 

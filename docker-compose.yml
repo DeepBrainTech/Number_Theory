@@ -30,6 +30,7 @@ services:
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       SESSION_SECRET: ${SESSION_SECRET:-dev-insecure-session-secret-change-me}
       COOKIE_SECURE: ${COOKIE_SECURE:-0}
+      COOKIE_SAMESITE: ${COOKIE_SAMESITE:-lax}
     ports:
       - "8000:8000"
     volumes:

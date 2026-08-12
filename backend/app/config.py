@@ -33,6 +33,10 @@ class Settings:
     google_client_id: str = os.getenv("GOOGLE_CLIENT_ID", "")
     session_secret: str = os.getenv("SESSION_SECRET", "dev-insecure-session-secret-change-me")
     cookie_secure: bool = os.getenv("COOKIE_SECURE", "0") == "1"
+    # lax | strict | none — use "none" when the browser talks to the API cross-site
+    # (e.g. frontend on deepbrainacademy.org, API on railway.app). Browsers require
+    # Secure when SameSite=None; we force cookie_secure in that case.
+    cookie_samesite: str = os.getenv("COOKIE_SAMESITE", "lax").strip().lower() or "lax"
 
 
 settings = Settings()
