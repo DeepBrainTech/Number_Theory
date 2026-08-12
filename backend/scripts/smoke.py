@@ -2,10 +2,9 @@
 
 Usage:  python backend/scripts/smoke.py [--base http://localhost:8000]
 
-Checks: health, library stats, retrieval, Sage whitelist ops (old + new),
-Lean compilation, formalize statement endpoint (needs OPENAI_API_KEY on the
-backend), and the chat endpoint. Prints PASS/FAIL per step; exits non-zero
-if any required step fails.
+Checks: health, Sage whitelist ops, Lean compilation, tools status,
+and optionally the chat endpoint. Prints PASS/FAIL per step; exits
+non-zero if any required step fails.
 """
 
 from __future__ import annotations
@@ -43,18 +42,6 @@ def main() -> int:
 
     response = client.get("/health")
     check("health", response.status_code == 200, response.text[:120])
-
-    response = client.get("/api/library/stats")
-    stats_ok = response.status_code == 200
-    detail = ""
-    if stats_ok:
-        payload = response.json()
-        detail = f"{payload['documents']} docs / {payload['chunks']} chunks"
-    check("library stats", stats_ok, detail)
-
-    response = client.post("/api/search", json={"query": "Chinese remainder theorem", "limit": 3})
-    hits = response.json() if response.status_code == 200 else []
-    check("search", response.status_code == 200 and len(hits) > 0, f"{len(hits)} hits")
 
     sage_cases = [
         ({"operation": "gcd", "arguments": ["391", "299"], "split": None}, "23"),
@@ -121,8 +108,6 @@ def main() -> int:
             "/api/chat",
             json={
                 "message": "What is Bezout's lemma?",
-                "limit": 3,
-                "client_id": client_id,
                 "answer_mode": "teach",
             },
         )
@@ -134,10 +119,7 @@ def main() -> int:
         )
         conversation_id = payload.get("conversation_id")
         if conversation_id:
-            response = client.get(
-                f"/api/conversations/{conversation_id}/verification-log",
-                params={"client_id": client_id},
-            )
+            response = client.get(f"/api/conversations/{conversation_id}/verification-log")
             check(
                 "verification log download",
                 response.status_code == 200 and "attachment" in response.headers.get("content-disposition", ""),

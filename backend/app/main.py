@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import FastAPI, Query, Response
+from fastapi import Depends, FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -20,9 +20,16 @@ from .chat import (
     suggest_title,
     validate_images,
 )
+from .auth import (
+    clear_session_cookie,
+    current_user,
+    set_session_cookie,
+    upsert_google_user,
+    verify_google_id_token,
+)
 from .config import settings
 from .formalize import generate_proof_draft, propose_statement, verify_statement
-from .auto_prove import run_auto_prove
+from .auto_prove import add_human_guidance, run_artifacts, run_auto_prove
 from .gating import gate_answer
 from .latex_ocr import image_to_latex
 from .conversations import (
@@ -48,7 +55,6 @@ from .memory import (
     memory_texts,
 )
 from .notebook import create_entry, delete_entry, export_notebook, list_entries
-from .retrieval import search
 from .schemas import (
     ChatRequest,
     ChatResponse,
@@ -62,16 +68,16 @@ from .schemas import (
     FormalizeStatementResponse,
     FormalizeVerifyRequest,
     FormalizeVerifyResponse,
+    AutoProveGuidanceRequest,
     AutoProveRequest,
     AutoProveResponse,
-    LibraryStats,
+    GoogleAuthRequest,
+    UserOut,
     MemoryCreate,
     MemoryOut,
     MessageOut,
     NotebookCreate,
     NotebookEntryOut,
-    SearchHit,
-    SearchRequest,
     SageRequest,
     LeanRequest,
     LatexFromImageRequest,
@@ -83,24 +89,12 @@ from .verification import call_lean, call_sage, verifier_status
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     initialize_database()
-    if settings.openai_api_key:
-        if settings.auto_ingest_manifest:
-            from .ingest import sync_deploy_manifest
-
-            asyncio.create_task(asyncio.to_thread(sync_deploy_manifest))
-        elif settings.ingest_if_empty:
-            with connection() as conn:
-                row = conn.execute("SELECT COUNT(*) AS count FROM chunks").fetchone()
-            if row and int(row["count"]) == 0:
-                from .ingest import ingest_all_approved
-
-                asyncio.create_task(asyncio.to_thread(ingest_all_approved))
     yield
 
 
 app = FastAPI(
-    title="Number Theory Agent API",
-    version="0.4.0",
+    title="Proof Lab API",
+    version="0.5.0",
     lifespan=lifespan,
 )
 app.add_middleware(
@@ -119,46 +113,58 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/api/library/stats", response_model=LibraryStats)
-def library_stats() -> LibraryStats:
-    with connection() as conn:
-        totals = conn.execute(
-            """
-            SELECT COUNT(DISTINCT d.id) AS documents,
-                   COUNT(c.id) AS chunks,
-                   MIN(d.page_start) AS page_start,
-                   MAX(d.page_end) AS page_end,
-                   MAX(d.embedding_model) AS embedding_model
-            FROM documents d
-            LEFT JOIN chunks c ON c.document_id = d.id
-            """
-        ).fetchone()
-        rows = conn.execute(
-            "SELECT block_type, COUNT(*) AS count FROM chunks GROUP BY block_type"
-        ).fetchall()
-    return LibraryStats(
-        documents=totals["documents"],
-        chunks=totals["chunks"],
-        page_start=totals["page_start"],
-        page_end=totals["page_end"],
-        block_types={row["block_type"]: row["count"] for row in rows},
-        embedding_model=totals["embedding_model"],
+def _owned(payload: Any, user: dict[str, Any]) -> Any:
+    if hasattr(payload, "client_id"):
+        payload.client_id = user["id"]
+    return payload
+
+
+@app.get("/api/auth/me", response_model=UserOut)
+def auth_me(user: dict[str, Any] = Depends(current_user)) -> UserOut:
+    return UserOut(**user)
+
+
+@app.post("/api/auth/google", response_model=UserOut)
+def auth_google(request: GoogleAuthRequest, response: Response) -> UserOut:
+    info = verify_google_id_token(request.id_token)
+    user = upsert_google_user(
+        sub=str(info["sub"]),
+        email=info.get("email"),
+        name=info.get("name"),
+        picture=info.get("picture"),
     )
+    set_session_cookie(response, user["id"])
+    return UserOut(**user)
+
+
+@app.post("/api/auth/logout")
+def auth_logout(response: Response) -> dict[str, str]:
+    clear_session_cookie(response)
+    return {"status": "signed_out"}
 
 
 @app.get("/api/conversations", response_model=list[ConversationOut])
-def conversations_list(client_id: str = Query(min_length=8, max_length=64)) -> list[ConversationOut]:
-    return [ConversationOut(**row) for row in list_conversations(client_id)]
+def conversations_list(user: dict[str, Any] = Depends(current_user)) -> list[ConversationOut]:
+    return [ConversationOut(**row) for row in list_conversations(user["id"])]
 
 
 @app.post("/api/conversations", response_model=ConversationOut)
-def conversations_create(request: ConversationCreate) -> ConversationOut:
+def conversations_create(
+    request: ConversationCreate,
+    user: dict[str, Any] = Depends(current_user),
+) -> ConversationOut:
+    _owned(request, user)
     return ConversationOut(**create_conversation(request.client_id, request.title))
 
 
 @app.patch("/api/conversations/{conversation_id}", response_model=ConversationOut)
-def conversations_rename(conversation_id: str, request: ConversationRename) -> ConversationOut:
+def conversations_rename(
+    conversation_id: str,
+    request: ConversationRename,
+    user: dict[str, Any] = Depends(current_user),
+) -> ConversationOut:
     ensure_uuid(conversation_id)
+    _owned(request, user)
     return ConversationOut(
         **rename_conversation(conversation_id, request.client_id, request.title)
     )
@@ -167,44 +173,43 @@ def conversations_rename(conversation_id: str, request: ConversationRename) -> C
 @app.delete("/api/conversations/{conversation_id}")
 def conversations_delete(
     conversation_id: str,
-    client_id: str = Query(min_length=8, max_length=64),
+    user: dict[str, Any] = Depends(current_user),
 ) -> dict[str, str]:
     ensure_uuid(conversation_id)
-    delete_conversation(conversation_id, client_id)
+    delete_conversation(conversation_id, user["id"])
     return {"status": "deleted"}
 
 
 @app.get("/api/conversations/{conversation_id}/messages", response_model=list[MessageOut])
 def conversations_messages(
     conversation_id: str,
-    client_id: str = Query(min_length=8, max_length=64),
+    user: dict[str, Any] = Depends(current_user),
 ) -> list[MessageOut]:
     ensure_uuid(conversation_id)
-    return [MessageOut(**row) for row in list_messages(conversation_id, client_id)]
+    return [MessageOut(**row) for row in list_messages(conversation_id, user["id"])]
 
 
 @app.get("/api/memories", response_model=list[MemoryOut])
-def memories_list(client_id: str = Query(min_length=8, max_length=64)) -> list[MemoryOut]:
-    return [MemoryOut(**row) for row in list_memories(client_id)]
+def memories_list(user: dict[str, Any] = Depends(current_user)) -> list[MemoryOut]:
+    return [MemoryOut(**row) for row in list_memories(user["id"])]
 
 
 @app.post("/api/memories", response_model=MemoryOut)
-def memories_create(request: MemoryCreate) -> MemoryOut:
+def memories_create(
+    request: MemoryCreate,
+    user: dict[str, Any] = Depends(current_user),
+) -> MemoryOut:
+    _owned(request, user)
     return MemoryOut(**create_memory(request.client_id, request.content))
 
 
 @app.delete("/api/memories/{memory_id}")
 def memories_delete(
     memory_id: int,
-    client_id: str = Query(min_length=8, max_length=64),
+    user: dict[str, Any] = Depends(current_user),
 ) -> dict[str, str]:
-    delete_memory(memory_id, client_id)
+    delete_memory(memory_id, user["id"])
     return {"status": "deleted"}
-
-
-@app.post("/api/search", response_model=list[SearchHit])
-def search_api(request: SearchRequest) -> list[SearchHit]:
-    return [SearchHit(**hit) for hit in search(request.query, request.limit)]
 
 
 def _prepare_chat(request: ChatRequest) -> tuple[str, list[dict[str, str]], list[str], list[str], str, bool]:
@@ -229,7 +234,6 @@ def _chat_response(
     content: str,
     mode: str,
     gate: Any,
-    hits_count: int,
     tool_results: list[dict[str, Any]],
     conversation_id: str,
     teach_depth: str,
@@ -246,7 +250,6 @@ def _chat_response(
         verification_notes=gate.notes,
         lean_aligned=gate.lean_aligned,
         premise_ok=gate.premise_ok,
-        retrieved_chunks=hits_count,
         tool_results=tool_results,
         conversation_id=conversation_id,
         new_memories=new_memories or [],
@@ -274,13 +277,8 @@ async def _store_memories_background(
 async def execute_chat(request: ChatRequest, status_emitter: StatusEmitter | None = None) -> ChatResponse:
     conversation_id, history, memories, images, user_text, is_first_turn = _prepare_chat(request)
 
-    search_query = user_text or "number theory mathematics"
-    if status_emitter is not None:
-        await status_emitter("retrieving", None)
-    hits = await asyncio.to_thread(search, search_query, request.limit)
     content, mode, gate, tool_results = await answer(
         user_text,
-        hits,
         history=history,
         memories=memories,
         answer_mode=request.answer_mode,
@@ -318,7 +316,6 @@ async def execute_chat(request: ChatRequest, status_emitter: StatusEmitter | Non
         content=content,
         mode=mode,
         gate=gate,
-        hits_count=len(hits),
         tool_results=tool_results,
         conversation_id=conversation_id,
         teach_depth=request.teach_depth,
@@ -327,12 +324,20 @@ async def execute_chat(request: ChatRequest, status_emitter: StatusEmitter | Non
 
 
 @app.post("/api/chat", response_model=ChatResponse)
-async def chat_api(request: ChatRequest) -> ChatResponse:
-    return await execute_chat(request)
+async def chat_api(
+    request: ChatRequest,
+    user: dict[str, Any] = Depends(current_user),
+) -> ChatResponse:
+    return await execute_chat(_owned(request, user))
 
 
 @app.post("/api/chat/stream")
-async def chat_stream_api(request: ChatRequest) -> StreamingResponse:
+async def chat_stream_api(
+    request: ChatRequest,
+    user: dict[str, Any] = Depends(current_user),
+) -> StreamingResponse:
+    _owned(request, user)
+
     async def event_stream():
         queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
 
@@ -353,13 +358,9 @@ async def chat_stream_api(request: ChatRequest) -> StreamingResponse:
                 conversation_id, history, memories, images, user_text, is_first_turn = _prepare_chat(
                     request
                 )
-                search_query = user_text or "number theory mathematics"
-                await on_status("retrieving", None)
-                hits = await asyncio.to_thread(search, search_query, request.limit)
 
                 content, mode, tool_results, structure_notes = await generate_answer(
                     user_text,
-                    hits,
                     history=history,
                     memories=memories,
                     answer_mode=request.answer_mode,
@@ -400,7 +401,6 @@ async def chat_stream_api(request: ChatRequest) -> StreamingResponse:
                     content=provisional_content,
                     mode=mode,
                     gate=gate,
-                    hits_count=len(hits),
                     tool_results=tool_results,
                     conversation_id=conversation_id,
                     teach_depth=request.teach_depth,
@@ -409,7 +409,7 @@ async def chat_stream_api(request: ChatRequest) -> StreamingResponse:
 
                 await on_status("gating", None)
                 final_gate = await gate_answer(
-                    search_query, content, tool_results, lean_code=None
+                    user_text, content, tool_results, lean_code=None
                 )
                 final_gate = _apply_structure_notes(final_gate, structure_notes)
                 final_content = (
@@ -469,13 +469,19 @@ async def chat_stream_api(request: ChatRequest) -> StreamingResponse:
 
 
 @app.post("/api/formalize/statement", response_model=FormalizeStatementResponse)
-async def formalize_statement_api(request: FormalizeStatementRequest) -> FormalizeStatementResponse:
+async def formalize_statement_api(
+    request: FormalizeStatementRequest,
+    _user: dict[str, Any] = Depends(current_user),
+) -> FormalizeStatementResponse:
     result = await propose_statement(request.question, request.method)
     return FormalizeStatementResponse(**result)
 
 
 @app.post("/api/formalize/proof", response_model=FormalizeProofResponse)
-async def formalize_proof_api(request: FormalizeProofRequest) -> FormalizeProofResponse:
+async def formalize_proof_api(
+    request: FormalizeProofRequest,
+    _user: dict[str, Any] = Depends(current_user),
+) -> FormalizeProofResponse:
     result = await generate_proof_draft(
         request.statement,
         question=request.question,
@@ -485,7 +491,10 @@ async def formalize_proof_api(request: FormalizeProofRequest) -> FormalizeProofR
 
 
 @app.post("/api/formalize/verify", response_model=FormalizeVerifyResponse)
-async def formalize_verify_api(request: FormalizeVerifyRequest) -> FormalizeVerifyResponse:
+async def formalize_verify_api(
+    request: FormalizeVerifyRequest,
+    _user: dict[str, Any] = Depends(current_user),
+) -> FormalizeVerifyResponse:
     result = await verify_statement(
         request.question,
         request.statement,
@@ -495,14 +504,45 @@ async def formalize_verify_api(request: FormalizeVerifyRequest) -> FormalizeVeri
     return FormalizeVerifyResponse(**result)
 
 
+_active_auto_prove_tasks: set[asyncio.Task[Any]] = set()
+
+
+@app.get("/api/auto-prove/runs/{run_id}")
+async def auto_prove_run_api(
+    run_id: str,
+    _user: dict[str, Any] = Depends(current_user),
+) -> dict[str, Any]:
+    report = run_artifacts(run_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Auto Prove run not found")
+    return report
+
+
+@app.post("/api/auto-prove/runs/{run_id}/guidance")
+async def auto_prove_guidance_api(
+    run_id: str,
+    request: AutoProveGuidanceRequest,
+    _user: dict[str, Any] = Depends(current_user),
+) -> dict[str, bool]:
+    if not add_human_guidance(run_id, request.guidance):
+        raise HTTPException(status_code=404, detail="Auto Prove run not found")
+    return {"ok": True}
+
+
 @app.post("/api/auto-prove", response_model=AutoProveResponse)
-async def auto_prove_api(request: AutoProveRequest) -> AutoProveResponse:
-    result = await run_auto_prove(request.problem, request.guidance, request.depth, request.formalize)
+async def auto_prove_api(
+    request: AutoProveRequest,
+    _user: dict[str, Any] = Depends(current_user),
+) -> AutoProveResponse:
+    result = await run_auto_prove(request.problem, request.guidance, request.depth, request.formalize, run_id=request.run_id, resume=request.resume)
     return AutoProveResponse(**result)
 
 
 @app.post("/api/auto-prove/stream")
-async def auto_prove_stream_api(request: AutoProveRequest) -> StreamingResponse:
+async def auto_prove_stream_api(
+    request: AutoProveRequest,
+    _user: dict[str, Any] = Depends(current_user),
+) -> StreamingResponse:
     async def event_stream():
         queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
 
@@ -512,13 +552,15 @@ async def auto_prove_stream_api(request: AutoProveRequest) -> StreamingResponse:
         async def worker() -> None:
             try:
                 result = await run_auto_prove(
-                    request.problem, request.guidance, request.depth, request.formalize, emit
+                    request.problem, request.guidance, request.depth, request.formalize, emit, request.run_id, request.resume
                 )
                 await queue.put({"type": "result", **result})
             finally:
                 await queue.put(None)
+                _active_auto_prove_tasks.discard(task)
 
         task = asyncio.create_task(worker())
+        _active_auto_prove_tasks.add(task)
         try:
             while True:
                 item = await queue.get()
@@ -526,18 +568,18 @@ async def auto_prove_stream_api(request: AutoProveRequest) -> StreamingResponse:
                     break
                 yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
         finally:
-            if not task.done():
-                task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+            # Closing a browser tab must not throw away a potentially long
+            # research run. Its checkpoint and artifacts remain queryable.
+            pass
 
     return StreamingResponse(event_stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
 
 
 @app.post("/api/latex/from-image", response_model=LatexFromImageResponse)
-async def latex_from_image_api(request: LatexFromImageRequest) -> LatexFromImageResponse:
+async def latex_from_image_api(
+    request: LatexFromImageRequest,
+    _user: dict[str, Any] = Depends(current_user),
+) -> LatexFromImageResponse:
     result = await image_to_latex(request.image)
     return LatexFromImageResponse(**result)
 
@@ -546,9 +588,11 @@ async def latex_from_image_api(request: LatexFromImageRequest) -> LatexFromImage
 def attach_verification(
     conversation_id: str,
     request: AttachVerificationRequest,
+    user: dict[str, Any] = Depends(current_user),
 ) -> MessageOut:
     """Attach a Lean-workbench verification result to an existing chat transcript."""
     ensure_uuid(conversation_id)
+    _owned(request, user)
     get_conversation(conversation_id, request.client_id)
     add_message(
         conversation_id,
@@ -567,12 +611,12 @@ def attach_verification(
 @app.get("/api/conversations/{conversation_id}/verification-log")
 def verification_log(
     conversation_id: str,
-    client_id: str = Query(min_length=8, max_length=64),
+    user: dict[str, Any] = Depends(current_user),
 ) -> Response:
     """Downloadable JSON log: every message with its gate level, notes, and tool calls."""
     ensure_uuid(conversation_id)
-    conversation = get_conversation(conversation_id, client_id)
-    rows = list_messages(conversation_id, client_id)
+    conversation = get_conversation(conversation_id, user["id"])
+    rows = list_messages(conversation_id, user["id"])
     payload = {
         "conversation_id": conversation_id,
         "title": conversation["title"],
@@ -600,13 +644,13 @@ def verification_log(
 
 
 @app.get("/api/notebook", response_model=list[NotebookEntryOut])
-def notebook_list(client_id: str = Query(min_length=8, max_length=64)) -> list[NotebookEntryOut]:
-    return [NotebookEntryOut(**row) for row in list_entries(client_id)]
+def notebook_list(user: dict[str, Any] = Depends(current_user)) -> list[NotebookEntryOut]:
+    return [NotebookEntryOut(**row) for row in list_entries(user["id"])]
 
 
 @app.get("/api/notebook/export")
-def notebook_export(client_id: str = Query(min_length=8, max_length=64)) -> Response:
-    payload = export_notebook(client_id)
+def notebook_export(user: dict[str, Any] = Depends(current_user)) -> Response:
+    payload = export_notebook(user["id"])
     return Response(
         content=json.dumps(payload, ensure_ascii=False, indent=2),
         media_type="application/json",
@@ -615,7 +659,11 @@ def notebook_export(client_id: str = Query(min_length=8, max_length=64)) -> Resp
 
 
 @app.post("/api/notebook", response_model=NotebookEntryOut)
-def notebook_create(request: NotebookCreate) -> NotebookEntryOut:
+def notebook_create(
+    request: NotebookCreate,
+    user: dict[str, Any] = Depends(current_user),
+) -> NotebookEntryOut:
+    _owned(request, user)
     return NotebookEntryOut(
         **create_entry(
             request.client_id,
@@ -630,20 +678,15 @@ def notebook_create(request: NotebookCreate) -> NotebookEntryOut:
 @app.delete("/api/notebook/{entry_id}")
 def notebook_delete(
     entry_id: int,
-    client_id: str = Query(min_length=8, max_length=64),
+    user: dict[str, Any] = Depends(current_user),
 ) -> dict[str, str]:
-    delete_entry(entry_id, client_id)
+    delete_entry(entry_id, user["id"])
     return {"status": "deleted"}
 
 
 @app.get("/api/tools/status")
 async def tools_status() -> dict:
     status = await verifier_status()
-    status["embedding"] = {
-        "model": settings.openai_embedding_model,
-        "configured": bool(settings.openai_api_key),
-        "dimensions": 1536,
-    }
     return status
 
 

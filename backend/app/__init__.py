@@ -1,1 +1,1 @@
-"""Number Theory Agent backend."""
+"""Proof Lab backend."""

@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent } from "react";
+import { apiUrl } from "../lib/api";
 
 export type NotebookEntry = {
   id: number;
@@ -42,7 +43,6 @@ const SAGE_OPS = [
 
 type Props = {
   apiBase: string;
-  clientId: string;
   entries: NotebookEntry[];
   labOp: string;
   labArgs: string;
@@ -73,8 +73,6 @@ function formatTime(value: string): string {
 }
 
 export default function NotebookPanel({
-  apiBase,
-  clientId,
   entries,
   labOp,
   labArgs,
@@ -101,15 +99,9 @@ export default function NotebookPanel({
             evidence. Polynomial ops use coefficients a₀,…,aₙ (e.g. x²+1 → 1,0,1).
           </p>
         </div>
-        {clientId && (
-          <a
-            className="downloadLog"
-            download
-            href={`${apiBase}/api/notebook/export?client_id=${encodeURIComponent(clientId)}`}
-          >
-            ⇩ Export JSON
-          </a>
-        )}
+        <a className="downloadLog" download href={apiUrl("/api/notebook/export")}>
+          ⇩ Export JSON
+        </a>
       </header>
 
       <div className="toolPanelGrid">

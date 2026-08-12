@@ -2,6 +2,7 @@
 
 import { ClipboardEvent, KeyboardEvent, useRef, useState } from "react";
 import MathMarkdown from "./MathMarkdown";
+import { apiFetch } from "../lib/api";
 
 type Props = {
   label: string;
@@ -98,9 +99,8 @@ export default function LatexField({
     setConverting(true);
     setOcrNote(null);
     try {
-      const response = await fetch(`${apiBase}/api/latex/from-image`, {
+      const response = await apiFetch("/api/latex/from-image", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ image: dataUrl }),
       });
       if (!response.ok) throw new Error("Image transcription failed");

@@ -11,32 +11,28 @@ class Settings:
         "DATABASE_URL",
         "postgresql://number_theory:number_theory_dev@localhost:5433/number_theory",
     )
-    pdf_root: Path = Path(os.getenv("PDF_ROOT", "../pdf")).resolve()
     cors_origins: tuple[str, ...] = tuple(
         origin.strip()
-        for origin in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+        for origin in os.getenv(
+            "CORS_ORIGINS",
+            "http://localhost:3000,https://proof-lab.deepbrainacademy.org",
+        ).split(",")
         if origin.strip()
     )
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     openai_model: str = os.getenv("OPENAI_MODEL", "gpt-5.6-sol")
-    openai_embedding_model: str = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
     openai_base_url: str | None = os.getenv("OPENAI_BASE_URL") or None
     sage_url: str = os.getenv("SAGE_URL", "http://localhost:8011").rstrip("/")
     lean_url: str = os.getenv("LEAN_URL", "http://localhost:8012").rstrip("/")
     verifier_timeout: float = float(os.getenv("VERIFIER_TIMEOUT", "70"))
-    # Math-concept query expansion via LLM (rule bridges are always on).
-    query_expansion_llm: bool = os.getenv("QUERY_EXPANSION_LLM", "1") == "1"
-    # Listwise LLM reranking of fused retrieval results (heuristic weighting is always on).
-    rerank_llm: bool = os.getenv("RERANK_LLM", "0") == "1"
     research_tool_timeout: float = float(os.getenv("RESEARCH_TOOL_TIMEOUT", "20"))
     semantic_scholar_api_key: str = os.getenv("SEMANTIC_SCHOLAR_API_KEY", "")
-    ingest_if_empty: bool = os.getenv("INGEST_IF_EMPTY", "0") == "1"
-    auto_ingest_manifest: bool = os.getenv("AUTO_INGEST_MANIFEST", "1") == "1"
-    deploy_ingest_targets: tuple[str, ...] = tuple(
-        item.strip()
-        for item in os.getenv("DEPLOY_INGEST_TARGETS", "").split(",")
-        if item.strip()
-    )
+    auto_prove_runs_dir: Path = Path(
+        os.getenv("AUTO_PROVE_RUNS_DIR", "data/auto_prove_runs")
+    ).resolve()
+    google_client_id: str = os.getenv("GOOGLE_CLIENT_ID", "")
+    session_secret: str = os.getenv("SESSION_SECRET", "dev-insecure-session-secret-change-me")
+    cookie_secure: bool = os.getenv("COOKIE_SECURE", "0") == "1"
 
 
 settings = Settings()

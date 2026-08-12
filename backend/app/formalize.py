@@ -19,7 +19,7 @@ from .verification import call_lean
 
 
 STATEMENT_PROMPT = (
-    "You translate a natural-language number-theory proposition into a Lean 4 + mathlib "
+    "You translate a natural-language mathematical proposition into a Lean 4 + mathlib "
     "theorem statement. Output JSON only, no Markdown fences: "
     '{"statement":"theorem <name> : <proposition>","explanation":string,"caveats":[string]}. '
     "Rules: the statement field contains ONLY the theorem signature (no := by, no proof); "

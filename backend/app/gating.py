@@ -11,7 +11,7 @@ from .config import settings
 
 
 LEVEL_LABELS = {
-    "retrieval_only": "Retrieval only · no proof generated",
+    "retrieval_only": "No model · API key not configured",
     "V0": "V0 · model-generated, unverified",
     "V1": "V1 · natural-language reasoning passed premise checks",
     "V2": "V2 · SageMath exact computation verified",
@@ -86,7 +86,7 @@ async def _structured_audit(
     response = await client.responses.create(
         model=settings.openai_model,
         instructions=(
-            "You are a correctness gate for number-theory answers. Output JSON only, no Markdown. "
+            "You are a correctness gate for mathematical answers. Output JSON only, no Markdown. "
             "Check: 1) premises, domains, and applicability conditions; "
             "2) conflicts with tool results; "
             "3) if Lean code is provided, whether its formal statement matches the user's question. "
@@ -119,7 +119,7 @@ async def _independent_critique(message: str, answer: str) -> tuple[bool, list[s
     response = await client.responses.create(
         model=settings.openai_model,
         instructions=(
-            "You are an independent verifier for number-theory answers. "
+            "You are an independent verifier for mathematical answers. "
             "First solve the user's question yourself from scratch, without assuming the "
             "candidate answer is right. Then compare conclusions and check the candidate for "
             "missing hypotheses, wrong quantifiers, division-by-zero cases, and counterexamples. "
@@ -228,7 +228,7 @@ async def gate_answer(
         return GateResult(
             level="retrieval_only",
             label=LEVEL_LABELS["retrieval_only"],
-            notes=["No model API key configured; returning retrieval results only."],
+            notes=["No model API key configured."],
         )
 
     successes = _tool_successes(tool_results)

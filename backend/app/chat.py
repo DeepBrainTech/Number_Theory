@@ -64,6 +64,9 @@ async def emit_status(emitter: StatusEmitter | None, phase: str, detail: str | N
         await emitter(phase, detail)
 
 
+# Hosted by OpenAI; executed inside the Responses API (no local round-trip).
+WEB_SEARCH_TOOL: dict[str, Any] = {"type": "web_search"}
+
 # Lean formalization lives in the Lean workbench UI (statement confirm → compile).
 # Chat agents keep Sage for concrete checks; they should not silently claim V4.
 BASE_TOOLS: list[dict[str, Any]] = [
@@ -189,27 +192,15 @@ RESEARCH_TOOLS: list[dict[str, Any]] = [
 
 
 def tools_for(_mode: ResolvedMode) -> list[dict[str, Any]]:
-    """Sage + literature tools in every mode; research mode only changes the answer template."""
-    return BASE_TOOLS + RESEARCH_TOOLS
+    """Sage, web search, and literature tools in every mode; research mode only changes the answer template."""
+    return [WEB_SEARCH_TOOL, *BASE_TOOLS, *RESEARCH_TOOLS]
 
 
-def retrieval_answer(hits: list[dict]) -> str:
-    if not hits:
-        return "Not enough relevant material was found in the indexed library to confirm an answer."
-    excerpts = []
-    for hit in hits[:3]:
-        label = hit["heading"] or hit["block_type"]
-        content = hit["content"]
-        if len(content) > 700:
-            content = content[:700].rstrip() + "…"
-        excerpts.append(f"[{label}]\n{content}")
-    return (
-        "OPENAI_API_KEY is not configured. Here are retrieval excerpts from the indexed library:\n\n"
-        + "\n\n".join(excerpts)
-    )
+def missing_api_key_answer() -> str:
+    return "OPENAI_API_KEY is not configured. Chat needs a model API key."
 
 
-async def _execute_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+async def execute_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     try:
         if name == "sage_calculate":
             result = await call_sage(arguments)
@@ -238,6 +229,43 @@ async def _execute_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         return {"tool": name, "ok": False, "error": f"Unknown tool: {name}"}
     except (httpx.HTTPError, ValueError) as exc:
         return {"tool": name, "ok": False, "error": f"Verifier call failed: {exc}"}
+
+
+def _attr(item: Any, name: str, default: Any = None) -> Any:
+    if isinstance(item, dict):
+        return item.get(name, default)
+    return getattr(item, name, default)
+
+
+def collect_hosted_tool_results(response: Any) -> list[dict[str, Any]]:
+    """Pull OpenAI-hosted web_search calls and URL citations out of a Responses payload."""
+    results: list[dict[str, Any]] = []
+    citations: list[dict[str, str]] = []
+    for item in _attr(response, "output", None) or []:
+        itype = _attr(item, "type")
+        if itype == "web_search_call":
+            action = _attr(item, "action")
+            results.append(
+                {
+                    "tool": "web_search",
+                    "ok": _attr(item, "status", "completed") == "completed",
+                    "query": _attr(action, "query") if action is not None else None,
+                }
+            )
+        elif itype == "message":
+            for part in _attr(item, "content", None) or []:
+                for annotation in _attr(part, "annotations", None) or []:
+                    if _attr(annotation, "type") == "url_citation":
+                        url = _attr(annotation, "url") or ""
+                        title = _attr(annotation, "title") or url
+                        if url:
+                            citations.append({"url": url, "title": title})
+    if citations:
+        if results:
+            results[-1]["citations"] = citations
+        else:
+            results.append({"tool": "web_search", "ok": True, "citations": citations})
+    return results
 
 
 def _legacy_verification(level: str) -> str:
@@ -273,15 +301,10 @@ def build_user_turn(
     *,
     mode_label: str,
     depth_note: str,
-    context: str,
     images: list[str] | None = None,
 ) -> dict[str, Any]:
     question = message.strip() or "(see attached image(s))"
-    text = (
-        f"Answer mode: {mode_label}{depth_note}\n"
-        f"Question: {question}\n\nRetrieved material:\n"
-        f"{context or 'No relevant material was retrieved.'}"
-    )
+    text = f"Answer mode: {mode_label}{depth_note}\nQuestion: {question}"
     if not images:
         return {"role": "user", "content": text}
     parts: list[dict[str, Any]] = [{"type": "input_text", "text": text}]
@@ -298,6 +321,15 @@ def provisional_gate() -> GateResult:
     )
 
 
+def _is_web_search_event(event: Any) -> bool:
+    etype = getattr(event, "type", None) or ""
+    if etype.startswith("response.web_search_call"):
+        return True
+    if etype == "response.output_item.added":
+        return _attr(getattr(event, "item", None), "type") == "web_search_call"
+    return False
+
+
 async def _stream_model_response(
     client: AsyncOpenAI,
     *,
@@ -307,6 +339,7 @@ async def _stream_model_response(
     tools: list[dict[str, Any]],
     previous_response_id: str | None = None,
     delta_emitter: DeltaEmitter | None = None,
+    status_emitter: StatusEmitter | None = None,
 ) -> Any:
     kwargs: dict[str, Any] = {
         "model": model,
@@ -320,12 +353,16 @@ async def _stream_model_response(
 
     stream = await client.responses.create(**kwargs)
     response = None
+    search_announced = False
     async for event in stream:
         etype = getattr(event, "type", None)
         if etype == "response.output_text.delta":
             delta = getattr(event, "delta", None) or ""
             if delta and delta_emitter is not None:
                 await delta_emitter(delta)
+        elif not search_announced and _is_web_search_event(event):
+            search_announced = True
+            await emit_status(status_emitter, "tool", "web_search")
         elif etype == "response.completed":
             response = event.response
     if response is None:
@@ -344,7 +381,7 @@ async def _run_tool_calls(
         except json.JSONDecodeError:
             arguments = {}
         await emit_status(status_emitter, "tool", call.name)
-        result = await _execute_tool(call.name, arguments)
+        result = await execute_tool(call.name, arguments)
         return call, result
 
     pairs = await asyncio.gather(*[_one(call) for call in calls])
@@ -378,7 +415,6 @@ def _apply_structure_notes(gate: GateResult, structure_notes: list[str]) -> Gate
 
 async def generate_answer(
     message: str,
-    hits: list[dict],
     *,
     history: list[dict[str, str]] | None = None,
     memories: list[str] | None = None,
@@ -390,12 +426,11 @@ async def generate_answer(
     reset_emitter: ResetEmitter | None = None,
 ) -> tuple[str, ResolvedMode | str, list[dict[str, Any]], list[str]]:
     """Generate the model answer (tools included). Does not run the correctness gate."""
-    search_query = message.strip() or "number theory mathematics"
+    search_query = message.strip() or "mathematics"
     resolved_mode = resolve_answer_mode(search_query, answer_mode)
     if not settings.openai_api_key:
-        return retrieval_answer(hits), "retrieval", [], []
+        return missing_api_key_answer(), "retrieval", [], []
 
-    context = "\n\n---\n\n".join(hit["content"] for hit in hits)
     instructions = system_prompt_for(resolved_mode, teach_depth) + format_memory_block(
         memories or []
     )
@@ -421,7 +456,6 @@ async def generate_answer(
             message,
             mode_label=mode_label,
             depth_note=depth_note,
-            context=context,
             images=images,
         )
     )
@@ -435,9 +469,10 @@ async def generate_answer(
         input_items=input_items,
         tools=tools,
         delta_emitter=delta_emitter,
+        status_emitter=status_emitter,
     )
 
-    tool_results: list[dict[str, Any]] = []
+    tool_results: list[dict[str, Any]] = collect_hosted_tool_results(response)
     max_tool_rounds = 5 if resolved_mode == "research" else 4
     for _ in range(max_tool_rounds):
         calls = [item for item in response.output if item.type == "function_call"]
@@ -456,7 +491,9 @@ async def generate_answer(
             tools=tools,
             previous_response_id=response.id,
             delta_emitter=delta_emitter,
+            status_emitter=status_emitter,
         )
+        tool_results.extend(collect_hosted_tool_results(response))
 
     content = response.output_text or ""
     structure_notes: list[str] = []
@@ -475,7 +512,6 @@ async def generate_answer(
 
 async def answer(
     message: str,
-    hits: list[dict],
     *,
     history: list[dict[str, str]] | None = None,
     memories: list[str] | None = None,
@@ -489,7 +525,6 @@ async def answer(
 ) -> tuple[str, ResolvedMode | str, GateResult, list[dict[str, Any]]]:
     content, resolved_mode, tool_results, structure_notes = await generate_answer(
         message,
-        hits,
         history=history,
         memories=memories,
         answer_mode=answer_mode,
@@ -504,7 +539,7 @@ async def answer(
         gate = _apply_structure_notes(provisional_gate(), structure_notes)
         return content, resolved_mode, gate, tool_results
 
-    search_query = message.strip() or "number theory mathematics"
+    search_query = message.strip() or "mathematics"
     await emit_status(status_emitter, "gating")
     gate = await gate_answer(search_query, content, tool_results, lean_code=None)
     gate = _apply_structure_notes(gate, structure_notes)

@@ -23,7 +23,7 @@ CROSSREF_API = "https://api.crossref.org/works"
 SEMANTIC_SCHOLAR_API = "https://api.semanticscholar.org/graph/v1/paper/search"
 
 _ATOM = "{http://www.w3.org/2005/Atom}"
-_USER_AGENT = "NumberTheoryAgent/0.1 (research; mailto:research@local)"
+_USER_AGENT = "ProofLab/0.5 (research; mailto:research@local)"
 
 
 _ARXIV_FIELD_PATTERN = re.compile(

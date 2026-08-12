@@ -1,6 +1,9 @@
 "use client";
 
+import { apiUrl } from "../lib/api";
+
 const TOOL_LABELS: Record<string, string> = {
+  web_search: "Searching the web",
   sage_calculate: "Computing with SageMath",
   arxiv_search: "Searching arXiv",
   semantic_scholar_search: "Searching Semantic Scholar",
@@ -24,7 +27,7 @@ export type StreamHandlers = {
 export function statusLabel(phase: string, detail?: string | null): string {
   switch (phase) {
     case "retrieving":
-      return "Searching library";
+      return "Starting";
     case "thinking":
       return "Thinking";
     case "gating":
@@ -61,10 +64,11 @@ export async function streamChat(
   const resolved: StreamHandlers =
     typeof handlers === "function" ? { onStatus: handlers } : handlers;
 
-  const response = await fetch(`${apiBase}/api/chat/stream`, {
+  const response = await fetch(apiUrl("/api/chat/stream"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    credentials: "include",
   });
   if (!response.ok) throw new Error("Failed to get a reply");
 

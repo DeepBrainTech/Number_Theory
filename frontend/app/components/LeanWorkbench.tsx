@@ -3,6 +3,7 @@
 import { FormEvent, useState } from "react";
 import LatexField from "./LatexField";
 import MathMarkdown from "./MathMarkdown";
+import { apiFetch } from "../lib/api";
 
 type LeanResult = {
   verified: boolean;
@@ -19,7 +20,6 @@ type Props = {
   leanAvailable: boolean;
   modelConfigured: boolean;
   conversationId: string | null;
-  clientId: string;
   onAttachedToChat?: () => void;
   onError?: (message: string) => void;
 };
@@ -44,7 +44,6 @@ export default function LeanWorkbench({
   leanAvailable,
   modelConfigured,
   conversationId,
-  clientId,
   onAttachedToChat,
   onError,
 }: Props) {
@@ -74,9 +73,8 @@ export default function LeanWorkbench({
     setBusy("statement");
     setResult(null);
     try {
-      const response = await fetch(`${apiBase}/api/formalize/statement`, {
+      const response = await apiFetch("/api/formalize/statement", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question: q, method: method.trim() }),
       });
       if (!response.ok) throw new Error("Statement request failed");
@@ -102,9 +100,8 @@ export default function LeanWorkbench({
     setBusy("proof");
     setResult(null);
     try {
-      const response = await fetch(`${apiBase}/api/formalize/proof`, {
+      const response = await apiFetch("/api/formalize/proof", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           question: question.trim(),
           statement: statement.trim(),
@@ -132,9 +129,8 @@ export default function LeanWorkbench({
     }
     setBusy("compile");
     try {
-      const response = await fetch(`${apiBase}/api/formalize/verify`, {
+      const response = await apiFetch("/api/formalize/verify", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           question: q,
           statement: statement.trim(),
@@ -164,7 +160,7 @@ export default function LeanWorkbench({
   }
 
   async function attachToChat() {
-    if (!result || !conversationId || !clientId || busy) return;
+    if (!result || !conversationId || busy) return;
     setBusy("attach");
     try {
       const status =
@@ -176,13 +172,11 @@ export default function LeanWorkbench({
       const content =
         `${status}\n\n**Proposition:** ${question.trim()}\n\n\`\`\`lean\n${result.code}\n\`\`\`` +
         (result.verified ? "" : `\n\nCompiler output:\n\n\`\`\`\n${result.output}\n\`\`\``);
-      const response = await fetch(
-        `${apiBase}/api/conversations/${conversationId}/attach-verification`,
+      const response = await apiFetch(
+        `/api/conversations/${conversationId}/attach-verification`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            client_id: clientId,
             content,
             verification_level: result.level,
             verification_label: `Lean workbench · ${result.level}`,

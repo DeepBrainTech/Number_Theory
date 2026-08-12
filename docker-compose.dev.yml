@@ -35,23 +35,22 @@ services:
       dockerfile: Dockerfile.dev
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://number_theory:number_theory_dev@db:5432/number_theory}
-      PDF_ROOT: /data/pdf
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,https://proof-lab.deepbrainacademy.org}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.6-sol}
-      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
       SAGE_URL: http://sage:8011
       LEAN_URL: http://lean:8012
       VERIFIER_TIMEOUT: ${VERIFIER_TIMEOUT:-310}
-      INGEST_IF_EMPTY: ${INGEST_IF_EMPTY:-0}
-      AUTO_INGEST_MANIFEST: ${AUTO_INGEST_MANIFEST:-1}
-      DEPLOY_INGEST_TARGETS: ${DEPLOY_INGEST_TARGETS:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      SESSION_SECRET: ${SESSION_SECRET:-dev-insecure-session-secret-change-me}
+      COOKIE_SECURE: ${COOKIE_SECURE:-0}
+      AUTO_PROVE_RUNS_DIR: ${AUTO_PROVE_RUNS_DIR:-/data/auto_prove_runs}
       WATCHFILES_FORCE_POLLING: "true"
     ports:
       - "8000:8000"
     volumes:
       - ./backend/app:/app/app
-      - ./pdf:/data/pdf:ro
+      - ./data/auto_prove_runs:/data/auto_prove_runs
     depends_on:
       db:
         condition: service_healthy
@@ -116,7 +115,9 @@ services:
       context: ./frontend
       dockerfile: Dockerfile.dev
     environment:
-      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-}
+      API_PROXY_TARGET: ${API_PROXY_TARGET:-http://backend:8000}
+      NEXT_PUBLIC_GOOGLE_CLIENT_ID: ${NEXT_PUBLIC_GOOGLE_CLIENT_ID:-${GOOGLE_CLIENT_ID:-}}
       WATCHPACK_POLLING: "true"
       WATCHPACK_POLLING_INTERVAL: "1000"
       CHOKIDAR_USEPOLLING: "true"
@@ -130,26 +131,6 @@ services:
     depends_on:
       backend:
         condition: service_healthy
-
-  ingest:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile.dev
-    environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql://number_theory:number_theory_dev@db:5432/number_theory}
-      PDF_ROOT: /data/pdf
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
-    volumes:
-      - ./backend/app:/app/app
-      - ./pdf:/data/pdf:ro
-    depends_on:
-      db:
-        condition: service_healthy
-    profiles: ["ingest"]
-    restart: "no"
-    command: ["python", "-m", "app.ingest", "--sync-manifest"]
 
 volumes:
   postgres_data:

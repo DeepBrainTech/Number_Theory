@@ -1,6 +1,7 @@
 import unittest
+from types import SimpleNamespace
 
-from app.chat import tools_for
+from app.chat import collect_hosted_tool_results, tools_for
 from app.modes import enforce_research_structure, validate_research_sections
 from app.research import dedupe_literature, parse_semantic_scholar
 
@@ -15,9 +16,45 @@ class ToolsForTests(unittest.TestCase):
             "oeis_search",
         }
         for mode in ("teach", "solve", "research"):
-            names = {tool["name"] for tool in tools_for(mode)}
+            tools = tools_for(mode)
+            names = {tool["name"] for tool in tools if "name" in tool}
+            types = {tool["type"] for tool in tools}
             self.assertIn("sage_calculate", names)
             self.assertTrue(literature.issubset(names))
+            self.assertIn("web_search", types)
+
+
+class HostedWebSearchTests(unittest.TestCase):
+    def test_collects_query_and_citations(self) -> None:
+        response = SimpleNamespace(
+            output=[
+                SimpleNamespace(
+                    type="web_search_call",
+                    status="completed",
+                    action=SimpleNamespace(query="twin primes 2026"),
+                ),
+                SimpleNamespace(
+                    type="message",
+                    content=[
+                        SimpleNamespace(
+                            annotations=[
+                                SimpleNamespace(
+                                    type="url_citation",
+                                    url="https://arxiv.org/abs/1234",
+                                    title="A paper",
+                                )
+                            ]
+                        )
+                    ],
+                ),
+            ]
+        )
+        results = collect_hosted_tool_results(response)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["tool"], "web_search")
+        self.assertTrue(results[0]["ok"])
+        self.assertEqual(results[0]["query"], "twin primes 2026")
+        self.assertEqual(results[0]["citations"][0]["url"], "https://arxiv.org/abs/1234")
 
 
 class ResearchStructureTests(unittest.TestCase):

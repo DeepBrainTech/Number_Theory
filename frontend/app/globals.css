@@ -48,6 +48,26 @@ textarea {
   width: var(--sidebar-width);
 }
 
+.sidebarBrand {
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px 14px;
+}
+
+.sidebarBrand strong {
+  color: #fffdf7;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+}
+
+.sidebarBrand span {
+  color: rgb(247 243 232 / 72%);
+  font-size: 12px;
+  line-height: 1.3;
+}
+
 .sidebarTools {
   display: grid;
   flex-shrink: 0;
@@ -630,6 +650,12 @@ textarea {
 .autoProveControls button.ghost { background: transparent; border: 1px solid var(--line); color: var(--green); }
 .autoProveControls button:disabled { cursor: not-allowed; opacity: .45; }
 .autoProveStatus { color: var(--muted); font-size: 13px; margin: 20px 0; }
+.autoProveResearch { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; margin-top: 18px; padding: 16px 20px; }
+.autoProveResearch p { color: var(--muted); font-size: 13px; margin: 8px 0; }
+.autoProveResearch textarea { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; color: var(--ink); display: block; font: inherit; margin: 10px 0; min-height: 70px; padding: 9px; resize: vertical; width: 100%; }
+.autoProveResearch button { background: var(--green); border: 0; border-radius: 8px; color: white; cursor: pointer; font-weight: 700; padding: 8px 12px; }
+.autoProveResearch button:disabled { cursor: not-allowed; opacity: .45; }
+.autoProveResearch button.secondary { background: transparent; border: 1px solid var(--green); color: var(--green); margin-left: 8px; }
 .autoProveResult, .autoProveReview, .autoProvePlan { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; margin-top: 18px; padding: 18px 20px; }
 .autoProveResult h3 { font-family: Georgia, serif; margin: 0 0 14px; }
 .autoProveReview { color: var(--muted); font-size: 13px; }
@@ -1825,4 +1851,109 @@ textarea {
     transform: none;
     width: min(240px, 70vw);
   }
+}
+
+.loginScreen {
+  align-items: center;
+  display: flex;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 32px 16px;
+}
+
+.loginCard {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  max-width: 420px;
+  padding: 36px 32px 32px;
+  width: 100%;
+}
+
+.loginEyebrow {
+  color: var(--gold);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  margin: 0 0 12px;
+}
+
+.loginCard h1 {
+  font-family: Georgia, "Noto Serif SC", serif;
+  font-size: 28px;
+  font-weight: 500;
+  margin: 0 0 12px;
+}
+
+.loginCopy {
+  color: var(--muted);
+  line-height: 1.65;
+  margin: 0 0 24px;
+}
+
+.loginButton {
+  display: flex;
+  justify-content: center;
+  min-height: 44px;
+}
+
+.accountFooter {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  padding: 10px 8px 0;
+}
+
+.accountAvatar,
+.accountAvatarFallback {
+  border-radius: 50%;
+  flex-shrink: 0;
+  height: 28px;
+  width: 28px;
+}
+
+.accountAvatarFallback {
+  align-items: center;
+  background: rgb(255 255 255 / 16%);
+  color: #f7f3e8;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 700;
+  justify-content: center;
+}
+
+.accountMeta {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.accountName,
+.accountEmail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.accountName {
+  color: #f7f3e8;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.accountEmail {
+  color: #c8d5ce;
+  font-size: 11px;
+}
+
+.accountSignOut {
+  background: transparent;
+  border: 1px solid rgb(255 255 255 / 22%);
+  border-radius: 8px;
+  color: #e8f0eb;
+  cursor: pointer;
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 5px 8px;
 }

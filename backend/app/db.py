@@ -8,51 +8,19 @@ import psycopg
 from psycopg.rows import dict_row
 
 from .config import settings
-from .embedding import DIMENSIONS, MODEL_NAME
 
 
 SCHEMA_STATEMENTS = [
-    "CREATE EXTENSION IF NOT EXISTS vector",
     """
-    CREATE TABLE IF NOT EXISTS documents (
-        id TEXT PRIMARY KEY,
-        filename TEXT NOT NULL,
-        title TEXT NOT NULL,
-        author TEXT NOT NULL,
-        sha256 TEXT NOT NULL,
-        page_start INTEGER NOT NULL,
-        page_end INTEGER NOT NULL,
-        embedding_model TEXT NOT NULL,
-        ingested_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    CREATE TABLE IF NOT EXISTS users (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        google_sub TEXT UNIQUE NOT NULL,
+        email TEXT,
+        name TEXT,
+        picture TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
-    """,
-    f"""
-    CREATE TABLE IF NOT EXISTS chunks (
-        id BIGSERIAL PRIMARY KEY,
-        document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-        ordinal INTEGER NOT NULL,
-        pdf_page INTEGER NOT NULL,
-        printed_page INTEGER,
-        chapter TEXT NOT NULL,
-        section TEXT,
-        block_type TEXT NOT NULL,
-        heading TEXT,
-        content TEXT NOT NULL,
-        content_tsv TSVECTOR GENERATED ALWAYS AS (
-            to_tsvector('english', coalesce(heading, '') || ' ' || content)
-        ) STORED,
-        embedding VECTOR({DIMENSIONS}) NOT NULL,
-        parent_ordinal INTEGER,
-        UNIQUE(document_id, ordinal)
-    )
-    """,
-    # Lightweight dependency link: proof chunks point at their theorem chunk.
-    "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS parent_ordinal INTEGER",
-    "CREATE INDEX IF NOT EXISTS chunks_content_tsv_idx ON chunks USING GIN(content_tsv)",
-    "CREATE INDEX IF NOT EXISTS chunks_document_idx ON chunks(document_id, ordinal)",
-    """
-    CREATE INDEX IF NOT EXISTS chunks_embedding_idx
-        ON chunks USING hnsw (embedding vector_cosine_ops)
     """,
     """
     CREATE TABLE IF NOT EXISTS conversations (
@@ -103,24 +71,6 @@ SCHEMA_STATEMENTS = [
         ON user_memories(client_id, updated_at DESC)
     """,
     """
-    CREATE TABLE IF NOT EXISTS chunk_deps (
-        id BIGSERIAL PRIMARY KEY,
-        source_chunk_id BIGINT NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
-        target_chunk_id BIGINT NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
-        relation TEXT NOT NULL
-            CHECK (relation IN ('uses_definition', 'uses_lemma', 'uses_theorem', 'proves')),
-        confidence REAL NOT NULL DEFAULT 0.5,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        UNIQUE (source_chunk_id, target_chunk_id, relation)
-    )
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS chunk_deps_source_idx ON chunk_deps(source_chunk_id)
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS chunk_deps_target_idx ON chunk_deps(target_chunk_id)
-    """,
-    """
     CREATE TABLE IF NOT EXISTS notebook_entries (
         id BIGSERIAL PRIMARY KEY,
         client_id TEXT NOT NULL,
@@ -158,60 +108,12 @@ def wait_for_database(attempts: int = 30, delay_seconds: float = 1.0) -> None:
     raise RuntimeError("Database did not become ready") from last_error
 
 
-def _embedding_dimension(conn: psycopg.Connection) -> int | None:
-    row = conn.execute(
-        """
-        SELECT format_type(a.atttypid, a.atttypmod) AS typ
-        FROM pg_attribute a
-        JOIN pg_class c ON c.oid = a.attrelid
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = 'public'
-          AND c.relname = 'chunks'
-          AND a.attname = 'embedding'
-          AND NOT a.attisdropped
-        """
-    ).fetchone()
-    if not row or not row["typ"]:
-        return None
-    text = str(row["typ"])
-    if text.startswith("vector(") and text.endswith(")"):
-        try:
-            return int(text[len("vector(") : -1])
-        except ValueError:
-            return None
-    return None
-
-
-def _ensure_embedding_schema(conn: psycopg.Connection) -> None:
-    exists = conn.execute(
-        "SELECT to_regclass('public.chunks') IS NOT NULL AS present"
-    ).fetchone()
-    if not exists or not exists["present"]:
-        return
-
-    dims = _embedding_dimension(conn)
-    stale_models = conn.execute(
-        """
-        SELECT COUNT(*) AS count
-        FROM documents
-        WHERE embedding_model NOT IN (%s, %s)
-        """,
-        (MODEL_NAME, settings.openai_embedding_model),
-    ).fetchone()
-    needs_rebuild = dims != DIMENSIONS or (stale_models and stale_models["count"] > 0)
-    if not needs_rebuild:
-        return
-
-    # Dimension or embedding model changed: wipe derived data so ingest can rebuild.
-    conn.execute("DROP TABLE IF EXISTS chunks CASCADE")
-    conn.execute("DROP TABLE IF EXISTS documents CASCADE")
-
-
 def initialize_database() -> None:
     wait_for_database()
     with connection() as conn:
-        conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
-        _ensure_embedding_schema(conn)
+        conn.execute("DROP TABLE IF EXISTS chunk_deps CASCADE")
+        conn.execute("DROP TABLE IF EXISTS chunks CASCADE")
+        conn.execute("DROP TABLE IF EXISTS documents CASCADE")
         for statement in SCHEMA_STATEMENTS:
             conn.execute(statement)
         conn.commit()

@@ -6,27 +6,21 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 
-class SearchRequest(BaseModel):
-    query: str = Field(min_length=1, max_length=500)
-    limit: int = Field(default=5, ge=1, le=20)
+class GoogleAuthRequest(BaseModel):
+    id_token: str = Field(min_length=20, max_length=10000)
 
 
-class SearchHit(BaseModel):
-    chunk_id: int
-    score: float
-    block_type: str
-    heading: str | None
-    content: str
-    pdf_page: int
-    printed_page: int | None
-    parent_ordinal: int | None = None
+class UserOut(BaseModel):
+    id: str
+    email: str | None = None
+    name: str | None = None
+    picture: str | None = None
 
 
 class ChatRequest(BaseModel):
     message: str = Field(default="", max_length=4000)
     images: list[str] = Field(default_factory=list, max_length=4)
-    limit: int = Field(default=5, ge=1, le=10)
-    client_id: str = Field(min_length=8, max_length=64)
+    client_id: str = Field(default="", max_length=64)
     conversation_id: str | None = None
     answer_mode: Literal["auto", "teach", "solve", "research"] = "auto"
     teach_depth: Literal["hint", "socratic", "full"] = "full"
@@ -48,7 +42,6 @@ class ChatResponse(BaseModel):
     verification_notes: list[str] = Field(default_factory=list)
     lean_aligned: bool | None = None
     premise_ok: bool = False
-    retrieved_chunks: int
     tool_results: list[dict[str, Any]] = Field(default_factory=list)
     conversation_id: str
     new_memories: list[dict[str, Any]] = Field(default_factory=list)
@@ -56,12 +49,12 @@ class ChatResponse(BaseModel):
 
 
 class ConversationCreate(BaseModel):
-    client_id: str = Field(min_length=8, max_length=64)
+    client_id: str = Field(default="", max_length=64)
     title: str = Field(default="New chat", max_length=80)
 
 
 class ConversationRename(BaseModel):
-    client_id: str = Field(min_length=8, max_length=64)
+    client_id: str = Field(default="", max_length=64)
     title: str = Field(min_length=1, max_length=80)
 
 
@@ -86,7 +79,7 @@ class MessageOut(BaseModel):
 
 
 class MemoryCreate(BaseModel):
-    client_id: str = Field(min_length=8, max_length=64)
+    client_id: str = Field(default="", max_length=64)
     content: str = Field(min_length=1, max_length=200)
 
 
@@ -99,7 +92,7 @@ class MemoryOut(BaseModel):
 
 
 class ClientQuery(BaseModel):
-    client_id: str = Field(min_length=8, max_length=64)
+    client_id: str = Field(default="", max_length=64)
 
 
 class SageRequest(BaseModel):
@@ -158,16 +151,22 @@ class FormalizeVerifyResponse(BaseModel):
 
 
 class AutoProveRequest(BaseModel):
-    """A bounded natural-language proof search request.
+    """A bounded QED-style proof search request.
 
-    This is deliberately separate from chat: proof search makes several model
-    calls and must not inherit an unbounded conversation history.
+    Separate from chat: several model calls with tools, a three-level retry
+    loop, and no unbounded conversation history.
     """
 
     problem: str = Field(min_length=1, max_length=8000)
     guidance: str = Field(default="", max_length=4000)
     depth: Literal["quick", "deep"] = "quick"
     formalize: bool = False
+    run_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{12}$")
+    resume: bool = False
+
+
+class AutoProveGuidanceRequest(BaseModel):
+    guidance: str = Field(min_length=1, max_length=4000)
 
 
 class AutoProveResponse(BaseModel):
@@ -176,6 +175,13 @@ class AutoProveResponse(BaseModel):
     plan: str | None = None
     review: list[str] = Field(default_factory=list)
     revisions: int = 0
+    proof_attempts: int = 0
+    decompositions: int = 0
+    difficulty: str | None = None
+    related_work: str | None = None
+    passed: bool | None = None
+    run_id: str | None = None
+    run_dir: str | None = None
     formalization: dict[str, Any] | None = None
     error: str | None = None
 
@@ -199,7 +205,7 @@ class LatexFromImageResponse(BaseModel):
 
 
 class AttachVerificationRequest(BaseModel):
-    client_id: str = Field(min_length=8, max_length=64)
+    client_id: str = Field(default="", max_length=64)
     content: str = Field(min_length=1, max_length=20000)
     verification_level: str = Field(default="V0", max_length=32)
     verification_label: str = Field(default="", max_length=200)
@@ -208,7 +214,7 @@ class AttachVerificationRequest(BaseModel):
 
 
 class NotebookCreate(BaseModel):
-    client_id: str = Field(min_length=8, max_length=64)
+    client_id: str = Field(default="", max_length=64)
     kind: Literal["experiment", "conjecture", "counterexample"]
     title: str = Field(min_length=1, max_length=160)
     content: str = Field(min_length=1, max_length=8000)
@@ -224,10 +230,3 @@ class NotebookEntryOut(BaseModel):
     created_at: datetime
 
 
-class LibraryStats(BaseModel):
-    documents: int
-    chunks: int
-    page_start: int | None
-    page_end: int | None
-    block_types: dict[str, int]
-    embedding_model: str | None = None

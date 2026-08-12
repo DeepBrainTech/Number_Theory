@@ -3,6 +3,7 @@
 import { FormEvent, useRef, useState } from "react";
 import LatexField from "./LatexField";
 import MathMarkdown from "./MathMarkdown";
+import { apiFetch } from "../lib/api";
 
 type Result = {
   ok: boolean;
@@ -10,6 +11,12 @@ type Result = {
   plan?: string;
   review?: string[];
   revisions?: number;
+  proof_attempts?: number;
+  decompositions?: number;
+  difficulty?: string;
+  related_work?: string;
+  passed?: boolean;
+  run_id?: string;
   formalization?: { verified?: boolean; aligned?: boolean | null; level?: string; notes?: string[]; error?: string };
   error?: string;
 };
@@ -20,6 +27,8 @@ type Props = {
   onError?: (message: string) => void;
 };
 
+type RunArtifacts = { files: string[]; checkpoint?: string; status?: string };
+
 export default function AutoProve({ apiBase, modelConfigured, onError }: Props) {
   const [problem, setProblem] = useState("");
   const [guidance, setGuidance] = useState("");
@@ -28,9 +37,12 @@ export default function AutoProve({ apiBase, modelConfigured, onError }: Props) 
   const [status, setStatus] = useState("");
   const [result, setResult] = useState<Result | null>(null);
   const [busy, setBusy] = useState(false);
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [runArtifacts, setRunArtifacts] = useState<RunArtifacts | null>(null);
+  const [researchNote, setResearchNote] = useState("");
   const controller = useRef<AbortController | null>(null);
 
-  async function run(event: FormEvent) {
+  async function run(event: FormEvent, resume = false) {
     event.preventDefault();
     if (!problem.trim() || busy) return;
     if (!modelConfigured) {
@@ -40,12 +52,16 @@ export default function AutoProve({ apiBase, modelConfigured, onError }: Props) 
     controller.current = new AbortController();
     setBusy(true);
     setResult(null);
+    const continuingRunId = resume ? activeRunId : null;
+    if (!resume) {
+      setRunArtifacts(null);
+      setActiveRunId(null);
+    }
     setStatus("Starting proof workflow");
     try {
-      const response = await fetch(`${apiBase}/api/auto-prove/stream`, {
+      const response = await apiFetch("/api/auto-prove/stream", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ problem: problem.trim(), guidance: guidance.trim(), depth, formalize }),
+        body: JSON.stringify({ problem: problem.trim(), guidance: guidance.trim(), depth, formalize, run_id: continuingRunId, resume }),
         signal: controller.current.signal,
       });
       if (!response.ok || !response.body) throw new Error("Auto Prove request failed");
@@ -62,9 +78,16 @@ export default function AutoProve({ apiBase, modelConfigured, onError }: Props) 
           const line = eventText.split("\n").find((line) => line.startsWith("data: "));
           if (!line) continue;
           const eventData = JSON.parse(line.slice(6)) as Result & { type: string; label?: string };
-          if (eventData.type === "status") setStatus(eventData.label ?? eventData.type);
+          if (eventData.type === "status") {
+            setStatus(eventData.label ?? eventData.type);
+            if (eventData.run_id) setActiveRunId(eventData.run_id);
+          }
           if (eventData.type === "result") {
             setResult(eventData);
+            if (eventData.run_id) {
+              setActiveRunId(eventData.run_id);
+              void loadArtifacts(eventData.run_id);
+            }
             setStatus(eventData.ok ? "Complete" : "Failed");
           }
         }
@@ -82,6 +105,22 @@ export default function AutoProve({ apiBase, modelConfigured, onError }: Props) 
     controller.current?.abort();
   }
 
+  async function loadArtifacts(runId: string) {
+    const response = await apiFetch(`/api/auto-prove/runs/${runId}`);
+    if (response.ok) setRunArtifacts(await response.json() as RunArtifacts);
+  }
+
+  async function submitResearchNote() {
+    if (!activeRunId || !researchNote.trim()) return;
+    const response = await apiFetch(`/api/auto-prove/runs/${activeRunId}/guidance`, {
+      method: "POST",
+      body: JSON.stringify({ guidance: researchNote.trim() }),
+    });
+    if (!response.ok) throw new Error("Could not save research guidance");
+    setResearchNote("");
+    setStatus("Research guidance saved; it will be used by the next agent call");
+  }
+
   return (
     <section className="autoProve">
       <header className="leanHeader">
@@ -89,8 +128,10 @@ export default function AutoProve({ apiBase, modelConfigured, onError }: Props) 
           <span className="chapterTag">AUTO PROVE</span>
           <h2>Proof search, with a referee loop</h2>
           <p className="leanSubtitle">
-            A bounded QED-inspired workflow: plan, draft, independent review, and revision. Natural-language
-            proofs remain unverified unless the optional Lean check succeeds.
+            QED-style loop: literature survey, decomposition plan, proof, structural then detailed review,
+            and a regulator that can revise the proof, revise the plan, or rewrite the strategy. Sage and
+            and literature tools are available to the agents. Natural-language proofs remain unverified unless
+            the optional Lean check succeeds.
           </p>
         </div>
         <span className={`leanStatus ${modelConfigured ? "ok" : "bad"}`}>
@@ -103,19 +144,35 @@ export default function AutoProve({ apiBase, modelConfigured, onError }: Props) 
         <LatexField apiBase={apiBase} disabled={busy} label="Hints or constraints (optional)" modelConfigured={modelConfigured}
           onChange={setGuidance} placeholder="For example: use induction; avoid advanced theorems." rows={4} value={guidance} />
         <div className="autoProveControls">
-          <label>Mode <select disabled={busy} value={depth} onChange={(e) => setDepth(e.target.value as "quick" | "deep")}>
-            <option value="quick">Quick — draft + two reviews</option><option value="deep">Deep — up to 2 revisions</option>
-          </select></label>
+          <span className="autoProveWorkflow">QED workflow · up to 4 proof attempts × 4 plan revisions × 4 rewrites</span>
           <label className="autoProveCheck"><input checked={formalize} disabled={busy} onChange={(e) => setFormalize(e.target.checked)} type="checkbox" /> Attempt Lean formalization</label>
           <button disabled={busy || !problem.trim()} type="submit">{busy ? "Working…" : "Prove"}</button>
           {busy && <button className="ghost" onClick={cancel} type="button">Cancel</button>}
         </div>
       </form>
       {status && <p className="autoProveStatus">{status}</p>}
+      {activeRunId && <div className="autoProveResearch">
+        <strong>Research run · {activeRunId}</strong>
+        <p>Add a constraint, counterexample lead, or suggested direction. The next agent call reads it from the persistent run record.</p>
+        <textarea disabled={!busy} onChange={(e) => setResearchNote(e.target.value)} placeholder="For example: avoid the current analytic route; first test the conjecture for prime powers." value={researchNote} />
+        <button disabled={!busy || !researchNote.trim()} onClick={() => void submitResearchNote()} type="button">Add research guidance</button>
+        {!busy && status === "Failed" && <button className="secondary" onClick={() => void run({ preventDefault() {} } as FormEvent, true)} type="button">Resume from checkpoint</button>}
+      </div>}
       {result?.error && <p className="error">{result.error}</p>}
-      {result?.proof && <div className="autoProveResult"><h3>Proof</h3><MathMarkdown content={result.proof} /></div>}
+      {result?.proof && <div className="autoProveResult"><h3>Proof{result.passed === false ? " (best attempt)" : ""}</h3><MathMarkdown content={result.proof} /></div>}
       {result?.review && result.review.length > 0 && <div className="autoProveReview"><strong>Remaining referee notes</strong><ul>{result.review.map((item) => <li key={item}>{item}</li>)}</ul></div>}
+      {(result?.difficulty || result?.run_id) && (
+        <div className="autoProveReview">
+          {result.difficulty && <p><strong>Difficulty:</strong> {result.difficulty}</p>}
+          <p>
+            {result.proof_attempts ?? 0} proof(s) · {result.revisions ?? 0} plan revision(s) · {result.decompositions ?? 0} decomposition(s)
+            {result.run_id ? ` · run ${result.run_id}` : ""}
+          </p>
+        </div>
+      )}
       {result?.plan && <details className="autoProvePlan"><summary>Proof plan</summary><MathMarkdown content={result.plan} /></details>}
+      {result?.related_work && <details className="autoProvePlan"><summary>Literature survey</summary><MathMarkdown content={result.related_work} /></details>}
+      {runArtifacts && <details className="autoProvePlan"><summary>Research artifacts ({runArtifacts.files.length})</summary><ul>{runArtifacts.files.map((file) => <li key={file}><code>{file}</code></li>)}</ul></details>}
       {result?.formalization && <div className="autoProveReview"><strong>Lean attempt · {result.formalization.level ?? "not verified"}</strong><p>{result.formalization.error ?? result.formalization.notes?.join(" ") ?? "No result."}</p></div>}
     </section>
   );
