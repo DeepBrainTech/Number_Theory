@@ -6,15 +6,15 @@ Production site: https://proof-lab.deepbrainacademy.org
 
 ## Start
 
-Docker Desktop required. Copy the env template and put your OpenAI API key in local `.env`:
+Docker Desktop required. Copy the env template and put your DeepSeek API key in local `.env`:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
 ```dotenv
-OPENAI_API_KEY=sk-...
-OPENAI_MODEL=gpt-5.6-sol
+DEEPSEEK_API_KEY=...
+DEEPSEEK_MODEL=deepseek-v4-pro
 ```
 
 `.env` is gitignored. Do not commit real secrets. Without a key the stack still starts, but chat cannot answer.
@@ -89,12 +89,12 @@ Content-Type: application/json
 
 ## Model config
 
-Backend uses the OpenAI Responses API with function calling. Default model: `gpt-5.6-sol`. The model can call:
+Backend uses the DeepSeek Responses API with function calling. Default model: `deepseek-v4-pro`. The model can call:
 
 - SageMath: gcd, factorization, primality, modular inverse, CRT, and related exact ops
 - Lean 4 + mathlib: compile formal proofs; rejects `sorry`, `admit`, new axioms, and exec
 - Literature tools: arXiv, Crossref, Semantic Scholar, OEIS
-- OpenAI `web_search` for public web pages
+- DeepSeek `web_search` for public web pages
 
 First Lean checks load full mathlib and may take 30–60s on constrained Docker Desktop; timeouts are set accordingly.
 

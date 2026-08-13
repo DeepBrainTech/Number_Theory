@@ -172,6 +172,23 @@ class FormalizeVerifyResponse(BaseModel):
     error: str | None = None
 
 
+class LeanWorkbenchStateRequest(BaseModel):
+    question: str = Field(default="", max_length=4000)
+    method: str = Field(default="", max_length=4000)
+    statement: str = Field(default="", max_length=8000)
+    explanation: str = Field(default="", max_length=8000)
+    caveats: list[str] = Field(default_factory=list, max_length=20)
+    code: str = Field(default="", max_length=12000)
+    result: dict[str, Any] | None = None
+
+
+class AutoProveReference(BaseModel):
+    """Extracted reference material supplied with an Auto Prove run."""
+
+    name: str = Field(min_length=1, max_length=180)
+    content: str = Field(min_length=1, max_length=60_000)
+
+
 class AutoProveRequest(BaseModel):
     """A bounded QED-style proof search request.
 
@@ -181,6 +198,7 @@ class AutoProveRequest(BaseModel):
 
     problem: str = Field(min_length=1, max_length=8000)
     guidance: str = Field(default="", max_length=4000)
+    references: list[AutoProveReference] = Field(default_factory=list, max_length=4)
     depth: Literal["quick", "deep"] = "quick"
     formalize: bool = False
     run_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{12}$")

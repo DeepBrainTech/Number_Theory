@@ -19,6 +19,10 @@ class Settings:
         ).split(",")
         if origin.strip()
     )
+    # DeepSeek is the default reasoning provider. OpenAI is retained for image input.
+    deepseek_api_key: str = os.getenv("DEEPSEEK_API_KEY", "")
+    deepseek_model: str = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
+    deepseek_base_url: str = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     openai_model: str = os.getenv("OPENAI_MODEL", "gpt-5.6-sol")
     openai_base_url: str | None = os.getenv("OPENAI_BASE_URL") or None
@@ -27,6 +31,7 @@ class Settings:
     verifier_timeout: float = float(os.getenv("VERIFIER_TIMEOUT", "70"))
     research_tool_timeout: float = float(os.getenv("RESEARCH_TOOL_TIMEOUT", "20"))
     semantic_scholar_api_key: str = os.getenv("SEMANTIC_SCHOLAR_API_KEY", "")
+    deepseek_web_search_timeout: float = float(os.getenv("DEEPSEEK_WEB_SEARCH_TIMEOUT", "120"))
     auto_prove_runs_dir: Path = Path(
         os.getenv("AUTO_PROVE_RUNS_DIR", "data/auto_prove_runs")
     ).resolve()

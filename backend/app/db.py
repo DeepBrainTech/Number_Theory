@@ -110,6 +110,37 @@ SCHEMA_STATEMENTS = [
     CREATE INDEX IF NOT EXISTS auto_prove_runs_client_idx
         ON auto_prove_runs(client_id, updated_at DESC)
     """,
+    """
+    CREATE TABLE IF NOT EXISTS lean_workbench_states (
+        client_id TEXT PRIMARY KEY,
+        question TEXT NOT NULL DEFAULT '',
+        method TEXT NOT NULL DEFAULT '',
+        statement TEXT NOT NULL DEFAULT '',
+        explanation TEXT NOT NULL DEFAULT '',
+        caveats JSONB NOT NULL DEFAULT '[]'::jsonb,
+        code TEXT NOT NULL DEFAULT '',
+        result JSONB,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS lean_workbench_runs (
+        id BIGSERIAL PRIMARY KEY,
+        client_id TEXT NOT NULL,
+        question TEXT NOT NULL,
+        method TEXT NOT NULL DEFAULT '',
+        statement TEXT NOT NULL DEFAULT '',
+        explanation TEXT NOT NULL DEFAULT '',
+        caveats JSONB NOT NULL DEFAULT '[]'::jsonb,
+        code TEXT NOT NULL,
+        result JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS lean_workbench_runs_client_idx
+        ON lean_workbench_runs(client_id, created_at DESC)
+    """,
 ]
 
 

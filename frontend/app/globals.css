@@ -117,6 +117,21 @@ textarea {
   width: 1.25rem;
 }
 
+.autoProveChevron {
+  margin-left: auto;
+  opacity: .75;
+}
+
+.autoProveNavRuns {
+  display: grid;
+  gap: 2px;
+  margin: -2px 0 5px;
+}
+
+.autoProveNavRuns .emptyHint { color: #afc2b4; font-size: 12px; margin: 5px 8px; }
+
+.autoProveNavRuns .conversationItem .autoProveNavDelete:disabled { display: none; }
+
 .sidebarChats {
   border-top: 1px solid rgb(255 255 255 / 12%);
   display: flex;
@@ -235,43 +250,43 @@ textarea {
   gap: 2px;
 }
 
-.sidebarChats .conversationItem {
+:is(.sidebarChats, .autoProveNavRuns) .conversationItem {
   background: transparent;
   border: 0;
   border-radius: 8px;
 }
 
-.sidebarChats .conversationItem:hover {
+:is(.sidebarChats, .autoProveNavRuns) .conversationItem:hover {
   background: rgb(255 255 255 / 10%);
 }
 
-.sidebarChats .conversationItem.active {
+:is(.sidebarChats, .autoProveNavRuns) .conversationItem.active {
   background: rgb(255 255 255 / 14%);
 }
 
-.sidebarChats .conversationMain {
+:is(.sidebarChats, .autoProveNavRuns) .conversationMain {
   padding: 9px 10px;
 }
 
-.sidebarChats .conversationTitle {
+:is(.sidebarChats, .autoProveNavRuns) .conversationTitle {
   font-size: 13px;
   font-weight: 500;
   line-height: 1.4;
   white-space: nowrap;
 }
 
-.sidebarChats .conversationTime {
+:is(.sidebarChats, .autoProveNavRuns) .conversationTime {
   display: none;
 }
 
-.sidebarChats .conversationItem .iconBtn {
+:is(.sidebarChats, .autoProveNavRuns) .conversationItem .iconBtn {
   margin-right: 4px;
   opacity: 0;
   transition: opacity 0.12s ease;
 }
 
-.sidebarChats .conversationItem:hover .iconBtn,
-.sidebarChats .conversationItem:focus-within .iconBtn {
+:is(.sidebarChats, .autoProveNavRuns) .conversationItem:hover .iconBtn,
+:is(.sidebarChats, .autoProveNavRuns) .conversationItem:focus-within .iconBtn {
   opacity: 1;
 }
 
@@ -636,6 +651,19 @@ textarea {
 }
 
 .autoProveCheck { align-items: center; display: inline-flex; gap: 6px; }
+.autoProveReferences { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; }
+.autoProveReferences > label { color: var(--ink); display: block; font-weight: 700; }
+.autoProveReferences > p, .autoProveReferenceLimit { color: var(--muted); display: block; font-size: 13px; line-height: 1.5; margin: 6px 0 10px; }
+.autoProveReferences textarea { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; color: var(--ink); display: block; font: inherit; min-height: 100px; padding: 10px; resize: vertical; width: 100%; }
+.autoProveReferenceInput { display: none; }
+.autoProveReferenceUpload { background: transparent; border: 1px solid var(--green); border-radius: 8px; color: var(--green); cursor: pointer; font-weight: 700; margin-top: 10px; padding: 7px 11px; }
+.autoProveReferenceUpload:disabled { cursor: not-allowed; opacity: .5; }
+.autoProveReferenceLimit { margin: 8px 0 0; }
+.autoProveReferenceList { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.autoProveReference { align-items: center; background: color-mix(in srgb, var(--green) 14%, var(--panel)); border-radius: 8px; display: flex; gap: 8px; max-width: 100%; padding: 6px 8px 6px 10px; }
+.autoProveReference span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.autoProveReference button { background: transparent; border: 0; color: var(--green); cursor: pointer; font-size: 18px; line-height: 1; padding: 0 2px; }
+.autoProveReference button:disabled { cursor: not-allowed; opacity: .5; }
 
 .autoProveControls button {
   background: var(--green);

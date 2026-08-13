@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useCallback, useEffect, useState } from "react";
 import LatexField from "./LatexField";
 import MathMarkdown from "./MathMarkdown";
 import { apiFetch } from "../lib/api";
@@ -15,10 +15,21 @@ type LeanResult = {
   notes: string[];
 };
 
+export type LeanRun = {
+  id: number;
+  question: string;
+  statement: string;
+  result: LeanResult;
+  created_at: string;
+};
+
 type Props = {
   apiBase: string;
   leanAvailable: boolean;
   modelConfigured: boolean;
+  authenticated: boolean;
+  onRunsChange: (runs: LeanRun[]) => void;
+  selectedRunId?: number | null;
   conversationId: string | null;
   onAttachedToChat?: () => void;
   onError?: (message: string) => void;
@@ -43,6 +54,9 @@ export default function LeanWorkbench({
   apiBase,
   leanAvailable,
   modelConfigured,
+  authenticated,
+  onRunsChange,
+  selectedRunId,
   conversationId,
   onAttachedToChat,
   onError,
@@ -57,6 +71,85 @@ export default function LeanWorkbench({
   );
   const [busy, setBusy] = useState<"statement" | "proof" | "compile" | "attach" | null>(null);
   const [result, setResult] = useState<LeanResult | null>(null);
+  const [hydrated, setHydrated] = useState(false);
+
+  const refreshRuns = useCallback(async () => {
+    if (!authenticated) {
+      onRunsChange([]);
+      return;
+    }
+    const response = await apiFetch("/api/lean-workbench/runs");
+    if (response.ok) onRunsChange(await response.json() as LeanRun[]);
+  }, [authenticated, onRunsChange]);
+
+  useEffect(() => {
+    if (!authenticated) {
+      setHydrated(false);
+      return;
+    }
+    let cancelled = false;
+    void apiFetch("/api/lean-workbench")
+      .then(async (response) => {
+        if (!response.ok || cancelled) return;
+        const saved = await response.json() as Partial<LeanResult> & {
+          question?: string; method?: string; statement?: string; explanation?: string;
+          caveats?: string[]; code?: string; result?: LeanResult | null;
+        };
+        if (cancelled) return;
+        setQuestion(saved.question ?? "");
+        setMethod(saved.method ?? "");
+        setStatement(saved.statement ?? "");
+        setExplanation(saved.explanation ?? "");
+        setCaveats(saved.caveats ?? []);
+        if (saved.code) setCode(saved.code);
+        setResult(saved.result ?? null);
+      })
+      .finally(() => { if (!cancelled) setHydrated(true); });
+    return () => { cancelled = true; };
+  }, [authenticated]);
+
+  useEffect(() => { void refreshRuns(); }, [refreshRuns]);
+
+  useEffect(() => {
+    if (!authenticated || !selectedRunId) return;
+    void apiFetch(`/api/lean-workbench/runs/${selectedRunId}`)
+      .then(async (response) => {
+        if (!response.ok) return;
+        const saved = await response.json() as LeanRun & {
+          method: string; explanation: string; caveats: string[]; code: string;
+        };
+        setQuestion(saved.question);
+        setMethod(saved.method || "");
+        setStatement(saved.statement || "");
+        setExplanation(saved.explanation || "");
+        setCaveats(saved.caveats || []);
+        setCode(saved.code || "");
+        setResult(saved.result || null);
+      });
+  }, [authenticated, selectedRunId]);
+
+  const saveRun = useCallback(async (snapshot: {
+    question: string; method: string; statement: string; explanation: string;
+    caveats: string[]; code: string; result: LeanResult;
+  }) => {
+    if (!authenticated) return;
+    const response = await apiFetch("/api/lean-workbench/runs", {
+      method: "POST",
+      body: JSON.stringify(snapshot),
+    });
+    if (response.ok) await refreshRuns();
+  }, [authenticated, refreshRuns]);
+
+  useEffect(() => {
+    if (!authenticated || !hydrated) return;
+    const timer = window.setTimeout(() => {
+      void apiFetch("/api/lean-workbench", {
+        method: "PUT",
+        body: JSON.stringify({ question, method, statement, explanation, caveats, code, result }),
+      });
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [authenticated, hydrated, question, method, statement, explanation, caveats, code, result]);
 
   function fail(message: string) {
     onError?.(message);
@@ -140,10 +233,31 @@ export default function LeanWorkbench({
       });
       if (!response.ok) throw new Error("Compile request failed");
       const data = await response.json();
-      if (!data.ok) throw new Error(data.error ?? "Verification failed");
+      if (!data.ok) {
+        const failedResult = {
+          verified: false,
+          aligned: data.aligned ?? null,
+          level: data.level ?? "V0",
+          statement: data.statement ?? statement,
+          code: data.code ?? lean,
+          output: data.output ?? data.error ?? "Verification failed",
+          notes: data.notes ?? [],
+        };
+        setResult(failedResult);
+        void saveRun({
+          question: q,
+          method: method.trim(),
+          statement: data.statement ?? statement,
+          explanation,
+          caveats,
+          code: data.code ?? lean,
+          result: failedResult,
+        });
+        throw new Error(data.error ?? "Verification failed");
+      }
       if (data.code) setCode(data.code);
       if (data.statement) setStatement(data.statement);
-      setResult({
+      const nextResult = {
         verified: Boolean(data.verified),
         aligned: data.aligned ?? null,
         level: data.level ?? "V0",
@@ -151,6 +265,16 @@ export default function LeanWorkbench({
         code: data.code ?? lean,
         output: data.output ?? "",
         notes: data.notes ?? [],
+      };
+      setResult(nextResult);
+      void saveRun({
+        question: q,
+        method: method.trim(),
+        statement: data.statement ?? statement,
+        explanation,
+        caveats,
+        code: data.code ?? lean,
+        result: nextResult,
       });
     } catch (reason) {
       fail(reason instanceof Error ? reason.message : "Unknown error");

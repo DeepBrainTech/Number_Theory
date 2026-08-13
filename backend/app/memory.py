@@ -105,17 +105,17 @@ async def extract_and_store_memories(
     user_message: str,
     assistant_message: str,
 ) -> list[dict[str, Any]]:
-    if not settings.openai_api_key:
+    if not settings.deepseek_api_key:
         return []
 
     existing = memory_texts(client_id)
     client = AsyncOpenAI(
-        api_key=settings.openai_api_key,
-        base_url=settings.openai_base_url,
+        api_key=settings.deepseek_api_key,
+        base_url=settings.deepseek_base_url,
     )
     try:
         response = await client.responses.create(
-            model=settings.openai_model,
+            model=settings.deepseek_model,
             instructions=MEMORY_EXTRACT_PROMPT,
             input=(
                 f"Existing memories:\n{json.dumps(existing, ensure_ascii=False)}\n\n"

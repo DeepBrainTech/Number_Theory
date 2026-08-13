@@ -133,3 +133,14 @@ def list_runs(client_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
 
 def owned_run_id(run_id: str, client_id: str) -> bool:
     return get_run(run_id, client_id) is not None
+
+
+def delete_run(run_id: str, client_id: str) -> bool:
+    """Delete one run's metadata, scoped to its owning account."""
+    with connection() as conn:
+        row = conn.execute(
+            "DELETE FROM auto_prove_runs WHERE run_id = %s AND client_id = %s RETURNING run_id",
+            (run_id, client_id),
+        ).fetchone()
+        conn.commit()
+    return row is not None

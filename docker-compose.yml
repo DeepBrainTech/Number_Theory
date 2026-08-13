@@ -21,8 +21,12 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://number_theory:number_theory_dev@db:5432/number_theory}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,https://proof-lab.deepbrainacademy.org}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-pro}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.6-sol}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
       SAGE_URL: http://sage:8011
       LEAN_URL: http://lean:8012
       VERIFIER_TIMEOUT: ${VERIFIER_TIMEOUT:-310}

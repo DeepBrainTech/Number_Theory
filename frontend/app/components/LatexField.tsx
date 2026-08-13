@@ -1,6 +1,6 @@
 "use client";
 
-import { ClipboardEvent, KeyboardEvent, useRef, useState } from "react";
+import { ClipboardEvent, KeyboardEvent, useId, useRef, useState } from "react";
 import MathMarkdown from "./MathMarkdown";
 import { apiFetch } from "../lib/api";
 
@@ -10,6 +10,7 @@ type Props = {
   onChange: (value: string) => void;
   placeholder?: string;
   rows?: number;
+  showPasteHint?: boolean;
   disabled?: boolean;
   apiBase: string;
   modelConfigured: boolean;
@@ -78,6 +79,7 @@ export default function LatexField({
   onChange,
   placeholder,
   rows = 5,
+  showPasteHint = true,
   disabled = false,
   apiBase,
   modelConfigured,
@@ -85,6 +87,7 @@ export default function LatexField({
   onEnterSubmit,
 }: Props) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const inputId = useId();
   const [converting, setConverting] = useState(false);
   const [ocrNote, setOcrNote] = useState<string | null>(null);
   const [toolbarOpen, setToolbarOpen] = useState(variant === "full");
@@ -150,8 +153,8 @@ export default function LatexField({
   }
 
   return (
-    <label className={`latexField ${variant === "compact" ? "compact" : ""}`}>
-      {label ? <span className="latexFieldLabel">{label}</span> : null}
+    <div className={`latexField ${variant === "compact" ? "compact" : ""}`}>
+      {label ? <label className="latexFieldLabel" htmlFor={inputId}>{label}</label> : null}
       {variant === "full" && toolbarOpen && (
         <div className="latexToolbar" role="toolbar" aria-label="LaTeX snippets">
           {SNIPPETS.map((item) => (
@@ -168,7 +171,7 @@ export default function LatexField({
           ))}
         </div>
       )}
-      {variant !== "compact" && (
+      {showPasteHint && variant !== "compact" && (
         <p className="latexHint">
           Paste a formula screenshot here (Ctrl+V) to auto-transcribe to LaTeX, then fix with the chips above.
         </p>
@@ -177,6 +180,7 @@ export default function LatexField({
         ref={textareaRef}
         className="latexInput"
         disabled={disabled || converting}
+        id={inputId}
         onChange={(event) => onChange(event.target.value)}
         onKeyDown={onKeyDown}
         onPaste={onPaste}
@@ -187,11 +191,11 @@ export default function LatexField({
       {converting && <p className="latexStatus">Transcribing pasted image…</p>}
       {ocrNote && !converting && <p className="latexStatus">{ocrNote}</p>}
       {hasPreview && (
-        <div className="latexPreview">
+        <div className="latexPreview" onMouseDown={(event) => event.preventDefault()}>
           <span className="latexPreviewLabel">Preview</span>
           <MathMarkdown content={previewSource} />
         </div>
       )}
-    </label>
+    </div>
   );
 }

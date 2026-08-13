@@ -19,7 +19,11 @@ async def service_health(url: str) -> dict[str, Any]:
 
 async def verifier_status() -> dict[str, Any]:
     return {
-        "openai": {
+        "deepseek": {
+            "configured": bool(settings.deepseek_api_key),
+            "model": settings.deepseek_model,
+        },
+        "openai_vision": {
             "configured": bool(settings.openai_api_key),
             "model": settings.openai_model,
         },

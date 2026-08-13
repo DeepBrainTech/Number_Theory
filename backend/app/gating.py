@@ -74,8 +74,8 @@ async def _structured_audit(
     lean_code: str | None,
 ) -> dict[str, Any]:
     client = AsyncOpenAI(
-        api_key=settings.openai_api_key,
-        base_url=settings.openai_base_url,
+        api_key=settings.deepseek_api_key,
+        base_url=settings.deepseek_base_url,
     )
     payload = {
         "user_question": message,
@@ -84,7 +84,7 @@ async def _structured_audit(
         "lean_code": lean_code,
     }
     response = await client.responses.create(
-        model=settings.openai_model,
+        model=settings.deepseek_model,
         instructions=(
             "You are a correctness gate for mathematical and physics answers. Output JSON only, no Markdown. "
             "Check: 1) premises, domains, units, physical assumptions, and applicability conditions; "
@@ -113,11 +113,11 @@ async def _independent_critique(message: str, answer: str) -> tuple[bool, list[s
     it reaches the same conclusion as the candidate answer.
     """
     client = AsyncOpenAI(
-        api_key=settings.openai_api_key,
-        base_url=settings.openai_base_url,
+        api_key=settings.deepseek_api_key,
+        base_url=settings.deepseek_base_url,
     )
     response = await client.responses.create(
-        model=settings.openai_model,
+        model=settings.deepseek_model,
         instructions=(
             "You are an independent verifier for mathematical and physics answers. "
             "First solve the user's question yourself from scratch, without assuming the "
@@ -225,7 +225,7 @@ async def gate_answer(
     *,
     lean_code: str | None = None,
 ) -> GateResult:
-    if not settings.openai_api_key:
+    if not settings.deepseek_api_key:
         return GateResult(
             level="retrieval_only",
             label=LEVEL_LABELS["retrieval_only"],

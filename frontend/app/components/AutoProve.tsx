@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import LatexField from "./LatexField";
 import MathMarkdown from "./MathMarkdown";
 import { apiFetch } from "../lib/api";
@@ -21,7 +21,7 @@ type Result = {
   error?: string;
 };
 
-type SavedRun = {
+export type SavedRun = {
   run_id: string;
   problem: string;
   guidance: string;
@@ -42,44 +42,73 @@ type SavedRun = {
 type Props = {
   apiBase: string;
   modelConfigured: boolean;
+  authenticated: boolean;
+  onRunsChange: (runs: SavedRun[]) => void;
+  selectedRunId?: string | null;
   onError?: (message: string) => void;
 };
 
 type RunArtifacts = { files: string[]; checkpoint?: string; status?: string; meta?: SavedRun };
+type ReferenceMaterial = { name: string; content: string };
 
-function previewProblem(text: string, max = 96): string {
-  const flat = text.replace(/\s+/g, " ").trim();
-  return flat.length > max ? `${flat.slice(0, max)}…` : flat;
+function formatElapsed(seconds: number): string {
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return minutes ? `${minutes}m${remainder}s` : `${remainder}s`;
 }
 
-function statusLabel(run: SavedRun): string {
-  if (run.status === "complete" && run.passed) return "Passed";
-  if (run.status === "complete" && run.passed === false) return "Finished (not verified)";
-  if (run.status === "failed") return "Failed";
-  if (run.status === "cancelled") return "Cancelled";
-  if (run.status === "running") return run.phase || "Running";
-  return run.status;
-}
-
-export default function AutoProve({ apiBase, modelConfigured, onError }: Props) {
+export default function AutoProve({
+  apiBase,
+  modelConfigured,
+  authenticated,
+  onRunsChange,
+  selectedRunId,
+  onError,
+}: Props) {
   const [problem, setProblem] = useState("");
   const [guidance, setGuidance] = useState("");
   const [depth, setDepth] = useState<"quick" | "deep">("quick");
   const [formalize, setFormalize] = useState(false);
   const [status, setStatus] = useState("");
+  const [toolStatus, setToolStatus] = useState("");
   const [result, setResult] = useState<Result | null>(null);
   const [busy, setBusy] = useState(false);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [runArtifacts, setRunArtifacts] = useState<RunArtifacts | null>(null);
   const [researchNote, setResearchNote] = useState("");
+  const [references, setReferences] = useState<ReferenceMaterial[]>([]);
+  const [uploadingReferences, setUploadingReferences] = useState(false);
   const [savedRuns, setSavedRuns] = useState<SavedRun[]>([]);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const controller = useRef<AbortController | null>(null);
+  const referenceInput = useRef<HTMLInputElement | null>(null);
+  const runStartedAt = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!busy) {
+      runStartedAt.current = null;
+      setElapsedSeconds(0);
+      return;
+    }
+    if (runStartedAt.current === null) runStartedAt.current = Date.now();
+    const updateElapsed = () => setElapsedSeconds(Math.floor((Date.now() - (runStartedAt.current ?? Date.now())) / 1000));
+    updateElapsed();
+    const timer = window.setInterval(updateElapsed, 1000);
+    return () => window.clearInterval(timer);
+  }, [busy]);
 
   const refreshHistory = useCallback(async () => {
+    if (!authenticated) {
+      setSavedRuns([]);
+      onRunsChange([]);
+      return;
+    }
     const response = await apiFetch("/api/auto-prove/runs");
     if (!response.ok) return;
-    setSavedRuns(await response.json() as SavedRun[]);
-  }, []);
+    const runs = await response.json() as SavedRun[];
+    setSavedRuns(runs);
+    onRunsChange(runs);
+  }, [authenticated, onRunsChange]);
 
   useEffect(() => {
     void refreshHistory();
@@ -98,7 +127,7 @@ export default function AutoProve({ apiBase, modelConfigured, onError }: Props) 
       setGuidance(payload.meta.guidance || "");
       setDepth(payload.meta.depth === "deep" ? "deep" : "quick");
       setFormalize(Boolean(payload.meta.formalize));
-      setStatus(payload.meta.phase || statusLabel(payload.meta));
+      setStatus(payload.meta.phase || payload.meta.status);
     }
     if (payload.result && typeof payload.result === "object") {
       setResult({ ...payload.result, run_id: runId, ok: payload.result.ok ?? true });
@@ -114,15 +143,26 @@ export default function AutoProve({ apiBase, modelConfigured, onError }: Props) 
     setGuidance(run.guidance || "");
     setDepth(run.depth === "deep" ? "deep" : "quick");
     setFormalize(Boolean(run.formalize));
-    setStatus(statusLabel(run));
+    setReferences([]);
+    setStatus(run.phase || run.status);
     await loadArtifacts(run.run_id);
   }
+
+  useEffect(() => {
+    if (!selectedRunId) return;
+    const run = savedRuns.find((item) => item.run_id === selectedRunId);
+    if (run && activeRunId !== selectedRunId) void openSavedRun(run);
+  }, [activeRunId, savedRuns, selectedRunId]);
 
   async function run(event: FormEvent, resume = false) {
     event.preventDefault();
     if (!problem.trim() || busy) return;
+    if (!authenticated) {
+      onError?.("Sign in to run Auto Prove. Proof runs are saved to your account.");
+      return;
+    }
     if (!modelConfigured) {
-      onError?.("OPENAI_API_KEY is required for Auto Prove.");
+      onError?.("DEEPSEEK_API_KEY is required for Auto Prove.");
       return;
     }
     controller.current = new AbortController();
@@ -140,6 +180,7 @@ export default function AutoProve({ apiBase, modelConfigured, onError }: Props) 
         body: JSON.stringify({
           problem: problem.trim(),
           guidance: guidance.trim(),
+          references,
           depth,
           formalize,
           run_id: continuingRunId,
@@ -160,9 +201,16 @@ export default function AutoProve({ apiBase, modelConfigured, onError }: Props) 
         for (const eventText of events) {
           const line = eventText.split("\n").find((line) => line.startsWith("data: "));
           if (!line) continue;
-          const eventData = JSON.parse(line.slice(6)) as Result & { type: string; label?: string };
+          const eventData = JSON.parse(line.slice(6)) as Result & { type: string; phase?: string; label?: string };
           if (eventData.type === "status") {
-            setStatus(eventData.label ?? eventData.type);
+            if (eventData.phase === "tool") {
+              setToolStatus(eventData.label ?? "");
+            } else if (eventData.phase === "tool_complete") {
+              setToolStatus("");
+            } else {
+              setStatus(eventData.label ?? eventData.type);
+              setToolStatus("");
+            }
             if (eventData.run_id) setActiveRunId(eventData.run_id);
           }
           if (eventData.type === "result") {
@@ -172,7 +220,15 @@ export default function AutoProve({ apiBase, modelConfigured, onError }: Props) 
               void loadArtifacts(eventData.run_id);
             }
             const cancelled = Boolean(eventData.error?.toLowerCase().includes("cancelled"));
-            setStatus(cancelled ? "Cancelled" : eventData.ok ? "Complete" : "Failed");
+            setStatus(
+              cancelled
+                ? "Cancelled"
+                : eventData.ok
+                  ? eventData.passed === false
+                    ? "Proof workflow finished without a passing review"
+                    : "Proof workflow complete"
+                  : "Failed",
+            );
             void refreshHistory();
           }
         }
@@ -189,11 +245,15 @@ export default function AutoProve({ apiBase, modelConfigured, onError }: Props) 
 
   async function cancelRun(runId?: string | null) {
     const id = runId ?? activeRunId;
+    setStatus("Cancelling…");
+    controller.current?.abort();
     if (id) {
       const response = await apiFetch(`/api/auto-prove/runs/${id}/cancel`, { method: "POST" });
-      if (!response.ok) onError?.("Could not cancel Auto Prove run");
+      if (!response.ok) {
+        onError?.("Could not cancel Auto Prove run");
+        return;
+      }
     }
-    controller.current?.abort();
     setStatus("Cancelled");
     setBusy(false);
     void refreshHistory();
@@ -208,6 +268,36 @@ export default function AutoProve({ apiBase, modelConfigured, onError }: Props) 
     if (!response.ok) throw new Error("Could not save research guidance");
     setResearchNote("");
     setStatus("Research guidance saved; it will be used by the next agent call");
+  }
+
+  async function addReferences(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    if (!files.length || busy) return;
+    const available = Math.max(0, 4 - references.length);
+    if (!available) {
+      onError?.("You can attach up to four reference files per proof run.");
+      return;
+    }
+    setUploadingReferences(true);
+    try {
+      const extracted: ReferenceMaterial[] = [];
+      for (const file of files.slice(0, available)) {
+        const form = new FormData();
+        form.append("file", file);
+        const response = await apiFetch("/api/auto-prove/references/extract", { method: "POST", body: form });
+        if (!response.ok) {
+          const detail = await response.json().catch(() => null) as { detail?: string } | null;
+          throw new Error(detail?.detail ?? `Could not read ${file.name}`);
+        }
+        extracted.push(await response.json() as ReferenceMaterial);
+      }
+      setReferences((current) => [...current, ...extracted]);
+    } catch (reason) {
+      onError?.(reason instanceof Error ? reason.message : "Could not read the reference file");
+    } finally {
+      setUploadingReferences(false);
+    }
   }
 
   const activeMeta = savedRuns.find((r) => r.run_id === activeRunId);
@@ -230,57 +320,59 @@ export default function AutoProve({ apiBase, modelConfigured, onError }: Props) 
           <span className="chapterTag">AUTO PROVE</span>
           <h2>Proof search, with a referee loop</h2>
           <p className="leanSubtitle">
-            QED-style loop: literature survey, decomposition plan, proof, structural then detailed review,
-            and a regulator that can revise the proof, revise the plan, or rewrite the strategy. Sage and
-            literature tools are available to the agents. Runs are saved to your account so you can reopen
-            them later. Natural-language proofs remain unverified unless the optional Lean check succeeds.
+            A structured QED workflow surveys relevant literature, decomposes the problem, develops candidate
+            proofs, and reviews them before revising the proof or strategy. Sage and research tools provide
+            evidence throughout. Every run is saved to your account; a conclusion is formally verified only
+            when the optional Lean check passes.
           </p>
         </div>
         <span className={`leanStatus ${modelConfigured ? "ok" : "bad"}`}>
           {modelConfigured ? "Model ready" : "API unavailable"}
         </span>
       </header>
-      {savedRuns.length > 0 && (
-        <div className="autoProveHistory">
-          <div className="autoProveHistoryHead">
-            <strong>Your research runs</strong>
-            <button className="ghost" disabled={busy} onClick={() => void refreshHistory()} type="button">Refresh</button>
-          </div>
-          <ul>
-            {savedRuns.map((run) => (
-              <li key={run.run_id}>
-                <button
-                  className={activeRunId === run.run_id ? "active" : undefined}
-                  disabled={busy}
-                  onClick={() => void openSavedRun(run)}
-                  type="button"
-                >
-                  <span className="autoProveHistoryTitle">{previewProblem(run.problem)}</span>
-                  <span className="autoProveHistoryMeta">
-                    {statusLabel(run)}
-                    {run.difficulty ? ` · ${run.difficulty}` : ""}
-                    {` · ${run.run_id}`}
-                  </span>
-                </button>
-                {run.status === "running" && (
-                  <button
-                    className="ghost autoProveStop"
-                    onClick={() => void cancelRun(run.run_id)}
-                    type="button"
-                  >
-                    Stop
-                  </button>
-                )}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
       <form className="autoProveForm" onSubmit={run}>
-        <LatexField apiBase={apiBase} disabled={busy} label="Problem to prove" modelConfigured={modelConfigured}
+        <LatexField apiBase={apiBase} disabled={busy} label="Problem to prove (LaTeX format)" modelConfigured={modelConfigured} showPasteHint={false}
           onChange={setProblem} placeholder="State a theorem or exercise precisely. LaTex is supported." rows={8} value={problem} />
-        <LatexField apiBase={apiBase} disabled={busy} label="Hints or constraints (optional)" modelConfigured={modelConfigured}
-          onChange={setGuidance} placeholder="For example: use induction; avoid advanced theorems." rows={4} value={guidance} />
+        <div className="autoProveReferences">
+          <label htmlFor="auto-prove-guidance">Research guidance, conjectures, and links (optional)</label>
+          <p>Give the agents a direction, a counterexample lead, or paper URLs. Attach readable source files below; they are saved with this run.</p>
+          <textarea
+            disabled={busy}
+            id="auto-prove-guidance"
+            onChange={(event) => setGuidance(event.target.value)}
+            placeholder="For example: conjecture that the obstruction is a parity barrier; compare https://arxiv.org/abs/...; avoid using unproved hypotheses."
+            rows={5}
+            value={guidance}
+          />
+          <input
+            accept=".pdf,.txt,.md,.tex,.bib,.csv,.json"
+            className="autoProveReferenceInput"
+            disabled={!authenticated || busy || uploadingReferences || references.length >= 4}
+            multiple
+            onChange={(event) => void addReferences(event)}
+            ref={referenceInput}
+            type="file"
+          />
+          <button
+            className="autoProveReferenceUpload"
+            disabled={!authenticated || busy || uploadingReferences || references.length >= 4}
+            onClick={() => referenceInput.current?.click()}
+            type="button"
+          >
+            {uploadingReferences ? "Reading reference…" : "Attach reference"}
+          </button>
+          <span className="autoProveReferenceLimit">PDF, TXT, Markdown, LaTeX, BibTeX, CSV, or JSON · up to 4 files, 3 MB each</span>
+          {references.length > 0 && (
+            <div className="autoProveReferenceList" aria-label="Attached references">
+              {references.map((reference, index) => (
+                <div className="autoProveReference" key={`${reference.name}-${index}`}>
+                  <span title={reference.name}>{reference.name}</span>
+                  <button aria-label={`Remove ${reference.name}`} disabled={busy} onClick={() => setReferences((items) => items.filter((_, itemIndex) => itemIndex !== index))} type="button">×</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
         <div className="autoProveControls">
           <span className="autoProveWorkflow">QED workflow · up to 4 proof attempts × 4 plan revisions × 4 rewrites</span>
           <label className="autoProveCheck"><input checked={formalize} disabled={busy} onChange={(e) => setFormalize(e.target.checked)} type="checkbox" /> Attempt Lean formalization</label>
@@ -288,7 +380,7 @@ export default function AutoProve({ apiBase, modelConfigured, onError }: Props) 
           {(busy || canStopActive) && <button className="ghost" onClick={() => void cancelRun()} type="button">Cancel</button>}
         </div>
       </form>
-      {status && <p className="autoProveStatus">{status}</p>}
+      {(status || toolStatus) && <p className="autoProveStatus">{toolStatus || status}{busy ? ` · ${formatElapsed(elapsedSeconds)}` : ""}</p>}
       {activeRunId && <div className="autoProveResearch">
         <strong>Research run · {activeRunId}</strong>
         <p>Add a constraint, counterexample lead, or suggested direction. The next agent call reads it from the persistent run record.</p>

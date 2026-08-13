@@ -12,6 +12,7 @@ import asyncio
 import contextvars
 import json
 import re
+import shutil
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -21,7 +22,14 @@ from typing import Any, Literal
 
 from openai import AsyncOpenAI
 
-from .chat import BASE_TOOLS, RESEARCH_TOOLS, WEB_SEARCH_TOOL, execute_tool
+from .chat import (
+    BASE_TOOLS,
+    RESEARCH_TOOLS,
+    WEB_SEARCH_TOOL,
+    execute_tool,
+    has_hosted_web_search_call,
+    response_output_as_input,
+)
 from .config import settings
 from .formalize import propose_statement, verify_statement
 from .prove_prompts import qed_prompt, skill_text
@@ -125,7 +133,7 @@ def mark_run_cancelled(run_id: str, store: RunStore | None = None, *, owner_id: 
 
 
 def _client() -> AsyncOpenAI:
-    return AsyncOpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
+    return AsyncOpenAI(api_key=settings.deepseek_api_key, base_url=settings.deepseek_base_url)
 
 
 def _now() -> str:
@@ -171,7 +179,7 @@ class RunStore:
             "role": role,
             "started_at": started_at,
             "elapsed_seconds": round(elapsed_seconds, 3),
-            "model": settings.openai_model,
+            "model": settings.deepseek_model,
             "input_tokens": getattr(usage, "input_tokens", None),
             "output_tokens": getattr(usage, "output_tokens", None),
             "total_tokens": getattr(usage, "total_tokens", None),
@@ -196,7 +204,10 @@ class RunStore:
         """Provide later agents a bounded, auditable view of prior artifacts."""
         parts: list[str] = []
         used = 0
-        for path in sorted(self.root.rglob("*")):
+        for path in sorted(
+            self.root.rglob("*"),
+            key=lambda item: (0 if item.parts[-2:-1] == ("references",) else 1, str(item)),
+        ):
             if not path.is_file() or path.name in {"call_log.jsonl", "checkpoint.json", "log.txt"}:
                 continue
             try:
@@ -223,6 +234,15 @@ def open_run_store(run_id: str) -> RunStore | None:
     if root.parent != settings.auto_prove_runs_dir.resolve() or not root.is_dir():
         return None
     return RunStore(root)
+
+
+def delete_run_artifacts(run_id: str) -> bool:
+    """Remove one validated run directory without allowing path traversal."""
+    store = open_run_store(run_id)
+    if store is None:
+        return False
+    shutil.rmtree(store.root)
+    return True
 
 
 def run_artifacts(run_id: str) -> dict[str, Any] | None:
@@ -451,17 +471,33 @@ async def _ask(
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}
     ]
     kwargs: dict[str, Any] = {
-        "model": settings.openai_model,
+        "model": settings.deepseek_model,
         "instructions": instructions,
         "input": input_items,
     }
     if tools:
         kwargs["tools"] = tools
     response = await client.responses.create(**kwargs)
+    active_tools = list(tools or [])
     for _ in range(max_rounds):
         _ensure_not_cancelled()
         calls = [item for item in (response.output or []) if getattr(item, "type", None) == "function_call"]
         if not calls:
+            if has_hosted_web_search_call(response):
+                # Preserve DeepSeek hosted web search for current information,
+                # then remove it for this step's remaining turns. This prevents
+                # repeated server-search payloads from bloating stateless context.
+                input_items.extend(response_output_as_input(response))
+                active_tools = [tool for tool in active_tools if tool.get("type") != "web_search"]
+                follow = {
+                    "model": settings.deepseek_model,
+                    "instructions": instructions,
+                    "input": input_items,
+                }
+                if active_tools:
+                    follow["tools"] = active_tools
+                response = await client.responses.create(**follow)
+                continue
             break
         outputs: list[dict[str, Any]] = []
         for call in calls:
@@ -473,6 +509,8 @@ async def _ask(
             if emit:
                 await emit("tool", {"label": f"Tool: {call.name}", "tool": call.name})
             result = await execute_tool(call.name, arguments)
+            if emit:
+                await emit("tool_complete", {"tool": call.name})
             outputs.append(
                 {
                     "type": "function_call_output",
@@ -480,18 +518,32 @@ async def _ask(
                     "output": json.dumps(result, ensure_ascii=False),
                 }
             )
+        input_items.extend(response_output_as_input(response))
+        input_items.extend(outputs)
         follow: dict[str, Any] = {
-            "model": settings.openai_model,
+            "model": settings.deepseek_model,
             "instructions": instructions,
-            "input": outputs,
-            "previous_response_id": response.id,
+            "input": input_items,
         }
-        if tools:
-            follow["tools"] = tools
+        if active_tools:
+            follow["tools"] = active_tools
         response = await client.responses.create(**follow)
     text = (response.output_text or "").strip()
     if not text:
-        raise RuntimeError("The model returned an empty response.")
+        # DeepSeek documents occasional empty outputs. Retry once with an
+        # explicit final-answer instruction instead of failing an entire run.
+        retry = await client.responses.create(
+            model=settings.deepseek_model,
+            instructions=(
+                f"{instructions}\n\nReturn a non-empty final textual answer now. "
+                "Do not make further tool calls."
+            ),
+            input=input_items,
+            tool_choice="none",
+        )
+        text = (retry.output_text or "").strip()
+        if not text:
+            raise RuntimeError("DeepSeek returned an empty response after one retry.")
     if run:
         role = str(payload.get("mode") or payload.get("verification_phase") or "agent")
         run.record_call(role, started.strftime("%Y-%m-%dT%H:%M:%SZ"), (datetime.now(timezone.utc) - started).total_seconds(), response)
@@ -507,10 +559,11 @@ async def run_auto_prove(
     run_id: str | None = None,
     resume: bool = False,
     owner_id: str | None = None,
+    references: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Run the QED-style proof loop and return artifacts plus a run directory."""
-    if not settings.openai_api_key:
-        return {"ok": False, "error": "OPENAI_API_KEY is not configured."}
+    if not settings.deepseek_api_key:
+        return {"ok": False, "error": "DEEPSEEK_API_KEY is not configured."}
 
     limits = DEPTH_BUDGETS.get(depth, DEPTH_BUDGETS["quick"])
     resuming = bool(resume and run_id)
@@ -532,6 +585,8 @@ async def run_auto_prove(
     assert run_id is not None
     run_token = _CURRENT_RUN.set(store)
     _register_run(run_id)
+    # Web search adds timely sources; scholarly APIs provide structured papers.
+    # `_ask` limits hosted web search to one call per model step.
     all_tools = [WEB_SEARCH_TOOL, *BASE_TOOLS, *RESEARCH_TOOLS]
     sage_tools = list(BASE_TOOLS)
 
@@ -590,6 +645,13 @@ async def run_auto_prove(
             store.write("problem.md", problem)
             if guidance.strip():
                 store.write("guidance.md", guidance)
+            for index, reference in enumerate(references or [], start=1):
+                name = str(reference.get("name") or f"reference-{index}")
+                content = str(reference.get("content") or "").strip()
+                if not content:
+                    continue
+                safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip(".-") or f"reference-{index}"
+                store.write(f"references/{index:02d}-{safe_name}.md", f"# Source: {name}\n\n{content}")
             store.write("config.json", json.dumps({"depth": depth, "formalize": formalize, **limits}, indent=2))
             await status("surveying", label="Literature survey and difficulty check")
             write_status("surveying")

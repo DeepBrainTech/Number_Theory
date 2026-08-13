@@ -4,8 +4,8 @@ import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import ChatComposer from "./components/ChatComposer";
 import GoogleLogin from "./components/GoogleLogin";
 import ThinkingStatus, { LoadingStatus, streamChat } from "./components/ThinkingStatus";
-import LeanWorkbench from "./components/LeanWorkbench";
-import AutoProve from "./components/AutoProve";
+import LeanWorkbench, { type LeanRun } from "./components/LeanWorkbench";
+import AutoProve, { type SavedRun } from "./components/AutoProve";
 import ModeDropdown, { ANSWER_MODE_OPTIONS, TEACH_DEPTH_OPTIONS } from "./components/ModeDropdown";
 import MathMarkdown from "./components/MathMarkdown";
 import MemoryPanel from "./components/MemoryPanel";
@@ -28,7 +28,8 @@ type Conversation = Omit<GuestConversation, "messages">;
 type Memory = GuestMemory;
 
 type ToolStatus = {
-  openai: { configured: boolean; model: string };
+  deepseek: { configured: boolean; model: string };
+  openai_vision: { configured: boolean; model: string };
   sage: { available: boolean; engine?: string };
   lean: { available: boolean; engine?: string };
 };
@@ -60,6 +61,11 @@ function formatTime(value: string): string {
   }
 }
 
+function autoProveTitle(problem: string): string {
+  const text = problem.replace(/\s+/g, " ").trim();
+  return text.length > 44 ? `${text.slice(0, 44)}…` : text || "Untitled proof";
+}
+
 function placeholderFor(mode: AnswerMode): string {
   switch (mode) {
     case "solve":
@@ -86,6 +92,13 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [pendingImages, setPendingImages] = useState<string[]>([]);
   const [rightView, setRightView] = useState<RightView>("chat");
+  const [leanExpanded, setLeanExpanded] = useState(false);
+  const [leanRuns, setLeanRuns] = useState<LeanRun[]>([]);
+  const [selectedLeanRunId, setSelectedLeanRunId] = useState<number | null>(null);
+  const [autoProveExpanded, setAutoProveExpanded] = useState(false);
+  const [autoProveRuns, setAutoProveRuns] = useState<SavedRun[]>([]);
+  const [selectedAutoProveRunId, setSelectedAutoProveRunId] = useState<string | null>(null);
+  const [autoProveRevision, setAutoProveRevision] = useState(0);
   const [answerMode, setAnswerMode] = useState<AnswerMode>("auto");
   const [teachDepth, setTeachDepth] = useState<TeachDepth>("full");
   const [memoryDraft, setMemoryDraft] = useState("");
@@ -173,6 +186,40 @@ export default function Home() {
       await loadConversation(convs[0].id);
     }
   }, [loadConversation, refreshConversations, refreshMemories, refreshNotebook]);
+
+  const refreshAutoProveRuns = useCallback(async () => {
+    if (!user) {
+      setAutoProveRuns([]);
+      return;
+    }
+    const response = await apiFetch("/api/auto-prove/runs");
+    if (response.ok) setAutoProveRuns(await response.json() as SavedRun[]);
+  }, [user]);
+
+  useEffect(() => {
+    void refreshAutoProveRuns();
+  }, [refreshAutoProveRuns]);
+
+  const deleteAutoProveRun = useCallback(async (run: SavedRun) => {
+    if (run.status === "running") {
+      setError("Cancel the running Auto Prove job before deleting it.");
+      return;
+    }
+    if (!window.confirm("Delete this Auto Prove run and all of its saved proof files? This cannot be undone.")) {
+      return;
+    }
+    const response = await apiFetch(`/api/auto-prove/runs/${run.run_id}`, { method: "DELETE" });
+    if (!response.ok) {
+      const detail = await response.json().catch(() => null) as { detail?: string } | null;
+      setError(detail?.detail || "Could not delete the Auto Prove run.");
+      return;
+    }
+    setAutoProveRuns((runs) => runs.filter((item) => item.run_id !== run.run_id));
+    if (selectedAutoProveRunId === run.run_id) {
+      setSelectedAutoProveRunId(null);
+      setAutoProveRevision((value) => value + 1);
+    }
+  }, [selectedAutoProveRunId]);
 
   useEffect(() => {
     apiFetch("/api/auth/me")
@@ -579,6 +626,7 @@ export default function Home() {
           <button
             className={`toolNavItem ${rightView === "lean" ? "active" : ""}`}
             onClick={() => {
+              setLeanExpanded((value) => !value);
               setRightView("lean");
               setError("");
             }}
@@ -586,15 +634,85 @@ export default function Home() {
           >
             <span className="toolNavIcon">λ</span>
             Lean workbench
+            <span className="autoProveChevron" aria-hidden="true">{leanExpanded ? "⌄" : "›"}</span>
           </button>
+          {leanExpanded && (
+            <div className="autoProveNavRuns" aria-label="Saved Lean workbench runs">
+              {!user && <p className="emptyHint">Sign in to view saved runs</p>}
+              {user && leanRuns.length === 0 && <p className="emptyHint">No Lean runs yet</p>}
+              {leanRuns.map((run) => (
+                <div
+                  className={`conversationItem ${
+                    rightView === "lean" && selectedLeanRunId === run.id ? "active" : ""
+                  }`}
+                  key={run.id}
+                >
+                  <button
+                    className="conversationMain"
+                    onClick={() => {
+                      setSelectedLeanRunId(run.id);
+                      setRightView("lean");
+                      setError("");
+                    }}
+                    title={`Lean verification: ${run.result?.level ?? "V0"}`}
+                    type="button"
+                  >
+                    <span className="conversationTitle">{autoProveTitle(run.question)}</span>
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           <button
             className={`toolNavItem ${rightView === "auto-prove" ? "active" : ""}`}
-            onClick={() => { setRightView("auto-prove"); setError(""); }}
+            onClick={() => {
+              setAutoProveExpanded((value) => !value);
+              setRightView("auto-prove");
+              setError("");
+            }}
             type="button"
           >
             <span className="toolNavIcon">∎</span>
             Auto Prove
+            <span className="autoProveChevron" aria-hidden="true">{autoProveExpanded ? "⌄" : "›"}</span>
           </button>
+          {autoProveExpanded && (
+            <div className="autoProveNavRuns" aria-label="Saved Auto Prove runs">
+              {!user && <p className="emptyHint">Sign in to view saved runs</p>}
+              {user && autoProveRuns.length === 0 && <p className="emptyHint">No proof runs yet</p>}
+              {autoProveRuns.map((run) => (
+                <div
+                  className={`conversationItem ${
+                    rightView === "auto-prove" && selectedAutoProveRunId === run.run_id ? "active" : ""
+                  }`}
+                  key={run.run_id}
+                >
+                  <button
+                    onClick={() => {
+                      setSelectedAutoProveRunId(run.run_id);
+                      setRightView("auto-prove");
+                      setError("");
+                    }}
+                    className="conversationMain"
+                    title={`Auto Prove run: ${run.status}`}
+                    type="button"
+                  >
+                    <span className="conversationTitle">{autoProveTitle(run.problem)}</span>
+                  </button>
+                  <button
+                    aria-label="Delete Auto Prove run"
+                    className="iconBtn autoProveNavDelete"
+                    disabled={run.status === "running"}
+                    onClick={() => void deleteAutoProveRun(run)}
+                    title={run.status === "running" ? "Cancel the run before deleting it" : "Delete run and saved files"}
+                    type="button"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           <button
             className={`toolNavItem ${rightView === "notebook" ? "active" : ""}`}
             onClick={() => {
@@ -671,10 +789,14 @@ export default function Home() {
           <>
             {error && <p className="error leanError">{error}</p>}
             <LeanWorkbench
+              key={user?.id ?? "guest"}
               apiBase={API_BASE}
               conversationId={activeId}
+              authenticated={Boolean(user)}
               leanAvailable={Boolean(tools?.lean.available)}
-              modelConfigured={Boolean(tools?.openai.configured)}
+              modelConfigured={Boolean(tools?.deepseek?.configured)}
+              onRunsChange={setLeanRuns}
+              selectedRunId={selectedLeanRunId}
               onAttachedToChat={async () => {
                 if (activeId) {
                   await loadConversation(activeId);
@@ -687,7 +809,15 @@ export default function Home() {
         ) : rightView === "auto-prove" ? (
           <>
             {error && <p className="error toolPanelError">{error}</p>}
-            <AutoProve apiBase={API_BASE} modelConfigured={Boolean(tools?.openai.configured)} onError={setError} />
+            <AutoProve
+              key={autoProveRevision}
+              apiBase={API_BASE}
+              authenticated={Boolean(user)}
+              modelConfigured={Boolean(tools?.deepseek?.configured)}
+              onRunsChange={setAutoProveRuns}
+              selectedRunId={selectedAutoProveRunId}
+              onError={setError}
+            />
           </>
         ) : rightView === "notebook" ? (
           <>

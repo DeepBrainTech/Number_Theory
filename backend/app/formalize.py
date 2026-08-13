@@ -56,7 +56,7 @@ def _strip_fences(text: str) -> str:
 
 
 def _client() -> AsyncOpenAI:
-    return AsyncOpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
+    return AsyncOpenAI(api_key=settings.deepseek_api_key, base_url=settings.deepseek_base_url)
 
 
 def _pack_input(question: str, method: str = "") -> str:
@@ -85,11 +85,11 @@ def extract_theorem_statement(code: str) -> str | None:
 
 
 async def propose_statement(question: str, method: str = "") -> dict[str, Any]:
-    if not settings.openai_api_key:
-        return {"ok": False, "error": "OPENAI_API_KEY is not configured."}
+    if not settings.deepseek_api_key:
+        return {"ok": False, "error": "DEEPSEEK_API_KEY is not configured."}
     try:
         response = await _client().responses.create(
-            model=settings.openai_model,
+            model=settings.deepseek_model,
             instructions=STATEMENT_PROMPT,
             input=_pack_input(question, method),
         )
@@ -124,8 +124,8 @@ async def generate_proof_draft(
     method: str = "",
 ) -> dict[str, Any]:
     """Generate Lean proof code without compiling (user goes into the editor)."""
-    if not settings.openai_api_key:
-        return {"ok": False, "error": "OPENAI_API_KEY is not configured."}
+    if not settings.deepseek_api_key:
+        return {"ok": False, "error": "DEEPSEEK_API_KEY is not configured."}
     payload = {
         "statement": statement,
         "proposition": question,
@@ -133,7 +133,7 @@ async def generate_proof_draft(
     }
     try:
         response = await _client().responses.create(
-            model=settings.openai_model,
+            model=settings.deepseek_model,
             instructions=PROOF_PROMPT,
             input=json.dumps(payload, ensure_ascii=False),
         )
@@ -154,7 +154,7 @@ async def generate_proof_draft(
 async def _check_alignment(question: str, statement: str) -> tuple[bool | None, list[str]]:
     try:
         response = await _client().responses.create(
-            model=settings.openai_model,
+            model=settings.deepseek_model,
             instructions=ALIGNMENT_PROMPT,
             input=json.dumps(
                 {"user_question": question, "lean_statement": statement},
@@ -181,8 +181,8 @@ async def verify_statement(
     method: str = "",
 ) -> dict[str, Any]:
     """Compile a proof and audit NL ↔ Lean alignment. V4 requires both."""
-    if not settings.openai_api_key and not code:
-        return {"ok": False, "error": "OPENAI_API_KEY is not configured and no proof was supplied."}
+    if not settings.deepseek_api_key and not code:
+        return {"ok": False, "error": "DEEPSEEK_API_KEY is not configured and no proof was supplied."}
 
     notes: list[str] = []
     proof_code = (code or "").strip()

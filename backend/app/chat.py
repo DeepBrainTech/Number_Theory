@@ -64,8 +64,24 @@ async def emit_status(emitter: StatusEmitter | None, phase: str, detail: str | N
         await emitter(phase, detail)
 
 
-# Hosted by OpenAI; executed inside the Responses API (no local round-trip).
-WEB_SEARCH_TOOL: dict[str, Any] = {"type": "web_search"}
+# DeepSeek's native server-side web search is reached through the Anthropic
+# compatibility endpoint.  Expose it to the main agent as a normal function so
+# its completed result can be persisted and passed to later proof stages.
+WEB_SEARCH_TOOL: dict[str, Any] = {
+    "type": "function",
+    "name": "web_search",
+    "description": (
+        "Search and read current public-web sources using DeepSeek hosted web search. "
+        "Use for current facts, paper landing pages, and sources outside the scholarly indexes."
+    ),
+    "strict": True,
+    "parameters": {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"],
+        "additionalProperties": False,
+    },
+}
 
 # Lean formalization lives in the Lean workbench UI (statement confirm → compile).
 # Chat agents keep Sage for concrete checks; they should not silently claim V4.
@@ -196,12 +212,17 @@ def tools_for(_mode: ResolvedMode) -> list[dict[str, Any]]:
     return [WEB_SEARCH_TOOL, *BASE_TOOLS, *RESEARCH_TOOLS]
 
 
-def missing_api_key_answer() -> str:
-    return "OPENAI_API_KEY is not configured. Chat needs a model API key."
+def missing_api_key_answer(*, needs_vision: bool = False) -> str:
+    if needs_vision:
+        return "OPENAI_API_KEY is not configured. Image questions require the OpenAI vision fallback."
+    return "DEEPSEEK_API_KEY is not configured. Chat needs a model API key."
 
 
 async def execute_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     try:
+        if name == "web_search":
+            result = await deepseek_web_search(arguments.get("query", ""))
+            return {"tool": name, **result}
         if name == "sage_calculate":
             result = await call_sage(arguments)
             return {"tool": name, **arguments, **result}
@@ -229,6 +250,65 @@ async def execute_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         return {"tool": name, "ok": False, "error": f"Unknown tool: {name}"}
     except (httpx.HTTPError, ValueError) as exc:
         return {"tool": name, "ok": False, "error": f"Verifier call failed: {exc}"}
+
+
+def _deepseek_anthropic_url() -> str:
+    base = settings.deepseek_base_url.rstrip("/")
+    if base.endswith("/anthropic"):
+        return f"{base}/v1/messages"
+    return f"{base}/anthropic/v1/messages"
+
+
+def _web_content_text(content: Any) -> str:
+    """Extract text and source payloads from DeepSeek's server tool blocks."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n\n".join(part for item in content if (part := _web_content_text(item)))
+    if not isinstance(content, dict):
+        return ""
+    kind = str(content.get("type") or "")
+    if kind == "text":
+        return str(content.get("text") or "")
+    for key in ("content", "results", "search_results", "result"):
+        if key in content:
+            text = _web_content_text(content[key])
+            if text:
+                return text
+    if kind == "web_search_tool_result":
+        return json.dumps(content, ensure_ascii=False)
+    return ""
+
+
+async def deepseek_web_search(query: str) -> dict[str, Any]:
+    """Run DeepSeek's hosted search using its documented Anthropic API bridge."""
+    query = query.strip()
+    if not query:
+        raise ValueError("web search query is required")
+    if not settings.deepseek_api_key:
+        raise ValueError("DEEPSEEK_API_KEY is not configured")
+    payload = {
+        "model": settings.deepseek_model,
+        "max_tokens": 4096,
+        "system": "Search the web for the user's query. Return factual findings with source URLs and titles.",
+        "messages": [{"role": "user", "content": query}],
+        "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 1}],
+        "tool_choice": {"type": "auto"},
+    }
+    headers = {
+        "x-api-key": settings.deepseek_api_key,
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "web-search-2025-03-05",
+    }
+    timeout = httpx.Timeout(settings.deepseek_web_search_timeout)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(_deepseek_anthropic_url(), headers=headers, json=payload)
+        response.raise_for_status()
+    body = response.json()
+    text = _web_content_text(body.get("content", []))
+    if not text:
+        raise ValueError("DeepSeek web search returned no readable result")
+    return {"ok": True, "query": query, "content": text[:60_000]}
 
 
 def _attr(item: Any, name: str, default: Any = None) -> Any:
@@ -370,6 +450,25 @@ async def _stream_model_response(
     return response
 
 
+def response_output_as_input(response: Any) -> list[dict[str, Any]]:
+    """Turn a Responses output into stateless input for DeepSeek follow-up calls."""
+    items: list[dict[str, Any]] = []
+    for item in _attr(response, "output", None) or []:
+        if isinstance(item, dict):
+            items.append(item)
+        elif hasattr(item, "model_dump"):
+            items.append(item.model_dump(exclude_none=True))
+    return items
+
+
+def has_hosted_web_search_call(response: Any) -> bool:
+    """Whether a provider-hosted web search needs a stateless follow-up turn."""
+    return any(
+        _attr(item, "type") == "web_search_call"
+        for item in (_attr(response, "output", None) or [])
+    )
+
+
 async def _run_tool_calls(
     calls: list[Any],
     *,
@@ -428,16 +527,23 @@ async def generate_answer(
     """Generate the model answer (tools included). Does not run the correctness gate."""
     search_query = message.strip() or "mathematics"
     resolved_mode = resolve_answer_mode(search_query, answer_mode)
-    if not settings.openai_api_key:
+    needs_vision = bool(images)
+    if needs_vision and not settings.openai_api_key:
+        return missing_api_key_answer(needs_vision=True), "retrieval", [], []
+    if not needs_vision and not settings.deepseek_api_key:
         return missing_api_key_answer(), "retrieval", [], []
 
     instructions = system_prompt_for(resolved_mode, teach_depth) + format_memory_block(
         memories or []
     )
+    # DeepSeek supports Responses API + web search. Its image-input gap is
+    # explicitly routed to OpenAI rather than silently degrading the request.
+    use_openai = needs_vision
     client = AsyncOpenAI(
-        api_key=settings.openai_api_key,
-        base_url=settings.openai_base_url,
+        api_key=settings.openai_api_key if use_openai else settings.deepseek_api_key,
+        base_url=settings.openai_base_url if use_openai else settings.deepseek_base_url,
     )
+    model = settings.openai_model if use_openai else settings.deepseek_model
 
     input_items: list[dict[str, Any]] = []
     for turn in history or []:
@@ -465,7 +571,7 @@ async def generate_answer(
     await emit_status(status_emitter, "thinking")
     response = await _stream_model_response(
         client,
-        model=settings.openai_model,
+        model=model,
         instructions=instructions,
         input_items=input_items,
         tools=tools,
@@ -478,19 +584,42 @@ async def generate_answer(
     for _ in range(max_tool_rounds):
         calls = [item for item in response.output if item.type == "function_call"]
         if not calls:
+            if not use_openai and has_hosted_web_search_call(response):
+                # DeepSeek restores server-side search results only after the
+                # web_search_call is returned as input to the next stateless turn.
+                input_items.extend(response_output_as_input(response))
+                await emit_status(status_emitter, "thinking")
+                response = await _stream_model_response(
+                    client,
+                    model=model,
+                    instructions=instructions,
+                    input_items=input_items,
+                    tools=tools,
+                    delta_emitter=delta_emitter,
+                    status_emitter=status_emitter,
+                )
+                tool_results.extend(collect_hosted_tool_results(response))
+                continue
             break
         if reset_emitter is not None:
             await reset_emitter()
         round_results, outputs = await _run_tool_calls(calls, status_emitter=status_emitter)
         tool_results.extend(round_results)
         await emit_status(status_emitter, "thinking")
+        follow_input = outputs
+        follow_response_id = response.id if use_openai else None
+        if not use_openai:
+            # DeepSeek's Responses endpoint is stateless and lacks previous_response_id.
+            input_items.extend(response_output_as_input(response))
+            input_items.extend(outputs)
+            follow_input = input_items
         response = await _stream_model_response(
             client,
-            model=settings.openai_model,
+            model=model,
             instructions=instructions,
-            input_items=outputs,
+            input_items=follow_input,
             tools=tools,
-            previous_response_id=response.id,
+            previous_response_id=follow_response_id,
             delta_emitter=delta_emitter,
             status_emitter=status_emitter,
         )

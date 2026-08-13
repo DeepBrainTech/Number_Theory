@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+from io import BytesIO
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Response
+from fastapi import Depends, FastAPI, File, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -29,8 +30,9 @@ from .auth import (
 )
 from .config import settings
 from .formalize import generate_proof_draft, propose_statement, verify_statement
-from .auto_prove import add_human_guidance, mark_run_cancelled, request_cancel, run_artifacts, run_auto_prove
-from .prove_runs import get_run, list_runs, owned_run_id
+from .lean_workspace import create_run as create_lean_run, get_run as get_lean_run, get_workspace, list_runs as list_lean_runs, save_workspace
+from .auto_prove import add_human_guidance, delete_run_artifacts, mark_run_cancelled, request_cancel, run_artifacts, run_auto_prove
+from .prove_runs import delete_run, get_run, list_runs, owned_run_id
 from .gating import gate_answer
 from .latex_ocr import image_to_latex
 from .conversations import (
@@ -70,7 +72,9 @@ from .schemas import (
     FormalizeStatementResponse,
     FormalizeVerifyRequest,
     FormalizeVerifyResponse,
+    LeanWorkbenchStateRequest,
     AutoProveGuidanceRequest,
+    AutoProveReference,
     AutoProveRequest,
     AutoProveResponse,
     AutoProveRunOut,
@@ -480,6 +484,40 @@ async def formalize_statement_api(
     return FormalizeStatementResponse(**result)
 
 
+@app.get("/api/lean-workbench")
+async def lean_workbench_get_api(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+    return get_workspace(user["id"]) or {}
+
+
+@app.put("/api/lean-workbench")
+async def lean_workbench_save_api(
+    request: LeanWorkbenchStateRequest,
+    user: dict[str, Any] = Depends(current_user),
+) -> dict[str, Any]:
+    return save_workspace(user["id"], request.model_dump())
+
+
+@app.get("/api/lean-workbench/runs")
+async def lean_workbench_runs_api(user: dict[str, Any] = Depends(current_user)) -> list[dict[str, Any]]:
+    return list_lean_runs(user["id"])
+
+
+@app.get("/api/lean-workbench/runs/{run_id}")
+async def lean_workbench_run_api(run_id: int, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+    run = get_lean_run(run_id, user["id"])
+    if run is None:
+        raise HTTPException(status_code=404, detail="Lean workbench run not found")
+    return run
+
+
+@app.post("/api/lean-workbench/runs")
+async def lean_workbench_run_create_api(
+    request: LeanWorkbenchStateRequest,
+    user: dict[str, Any] = Depends(current_user),
+) -> dict[str, Any]:
+    return create_lean_run(user["id"], request.model_dump())
+
+
 @app.post("/api/formalize/proof", response_model=FormalizeProofResponse)
 async def formalize_proof_api(
     request: FormalizeProofRequest,
@@ -530,6 +568,50 @@ def _serialize_run(row: dict[str, Any]) -> AutoProveRunOut:
     )
 
 
+_REFERENCE_FILE_LIMIT = 3 * 1024 * 1024
+_REFERENCE_TEXT_LIMIT = 60_000
+_REFERENCE_EXTENSIONS = {".txt", ".md", ".tex", ".bib", ".csv", ".json", ".pdf"}
+
+
+@app.post("/api/auto-prove/references/extract", response_model=AutoProveReference)
+async def auto_prove_reference_extract_api(
+    file: UploadFile = File(...),
+    _user: dict[str, Any] = Depends(current_user),
+) -> AutoProveReference:
+    """Extract a bounded, readable reference for inclusion in one proof run."""
+    name = (file.filename or "reference").replace("\\", "/").split("/")[-1]
+    suffix = "." + name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    if suffix not in _REFERENCE_EXTENSIONS:
+        raise HTTPException(status_code=415, detail="Use a PDF, TXT, Markdown, LaTeX, BibTeX, CSV, or JSON file")
+    raw = await file.read(_REFERENCE_FILE_LIMIT + 1)
+    if len(raw) > _REFERENCE_FILE_LIMIT:
+        raise HTTPException(status_code=413, detail="Each reference file must be 3 MB or smaller")
+    if suffix == ".pdf":
+        try:
+            from pypdf import PdfReader
+
+            reader = PdfReader(BytesIO(raw))
+            chunks: list[str] = []
+            used = 0
+            for page in reader.pages:
+                text = page.extract_text() or ""
+                remaining = _REFERENCE_TEXT_LIMIT - used
+                if remaining <= 0:
+                    break
+                chunks.append(text[:remaining])
+                used += len(chunks[-1])
+            content = "\n\n".join(chunks).strip()
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail="This PDF could not be read as text. Upload a text-based PDF or paste a link/summary.") from exc
+    else:
+        content = raw.decode("utf-8", errors="replace").strip()
+    if not content:
+        raise HTTPException(status_code=422, detail="No readable text was found in this reference")
+    if len(content) > _REFERENCE_TEXT_LIMIT:
+        content = content[:_REFERENCE_TEXT_LIMIT] + "\n\n[Reference truncated after 60,000 characters.]"
+    return AutoProveReference(name=name[:180], content=content)
+
+
 @app.get("/api/auto-prove/runs", response_model=list[AutoProveRunOut])
 def auto_prove_runs_list(user: dict[str, Any] = Depends(current_user)) -> list[AutoProveRunOut]:
     return [_serialize_run(row) for row in list_runs(user["id"])]
@@ -545,6 +627,25 @@ async def auto_prove_run_api(
         raise HTTPException(status_code=404, detail="Auto Prove run not found")
     report = run_artifacts(run_id) or {"run_id": run_id, "files": []}
     return {**report, "meta": _serialize_run(meta).model_dump(mode="json")}
+
+
+@app.delete("/api/auto-prove/runs/{run_id}")
+async def auto_prove_run_delete_api(
+    run_id: str,
+    user: dict[str, Any] = Depends(current_user),
+) -> dict[str, bool]:
+    meta = get_run(run_id, user["id"])
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Auto Prove run not found")
+    if meta["status"] == "running":
+        raise HTTPException(status_code=409, detail="Cancel a running Auto Prove run before deleting it")
+    try:
+        delete_run_artifacts(run_id)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not delete Auto Prove artifacts: {exc}") from exc
+    if not delete_run(run_id, user["id"]):
+        raise HTTPException(status_code=404, detail="Auto Prove run not found")
+    return {"ok": True}
 
 
 @app.post("/api/auto-prove/runs/{run_id}/guidance")
@@ -570,10 +671,10 @@ async def auto_prove_cancel_api(
         raise HTTPException(status_code=404, detail="Auto Prove run not found")
     if meta["status"] != "running":
         return {"ok": True, "cancelled": False, "status": meta["status"]}
-    alive = request_cancel(run_id)
-    if not alive:
-        # Worker is gone (e.g. process restart) but DB still says running.
-        mark_run_cancelled(run_id, owner_id=user["id"])
+    # Persist cancellation before waiting for a model/network call to unwind, so
+    # the UI and account history reflect the user's action immediately.
+    request_cancel(run_id)
+    mark_run_cancelled(run_id, owner_id=user["id"])
     return {"ok": True, "cancelled": True, "status": "cancelled"}
 
 
@@ -592,6 +693,7 @@ async def auto_prove_api(
         run_id=request.run_id,
         resume=request.resume,
         owner_id=user["id"],
+        references=[reference.model_dump() for reference in request.references],
     )
     return AutoProveResponse(**result)
 
@@ -622,6 +724,7 @@ async def auto_prove_stream_api(
                     request.run_id,
                     request.resume,
                     owner_id=owner_id,
+                    references=[reference.model_dump() for reference in request.references],
                 )
                 await queue.put({"type": "result", **result})
             finally:
