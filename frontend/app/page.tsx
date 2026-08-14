@@ -183,7 +183,7 @@ export default function Home() {
   }, []);
 
   const loadWorkspace = useCallback(async () => {
-    const [toolsResponse, convs] = await Promise.all([
+    const [toolsResponse] = await Promise.all([
       apiFetch("/api/tools/status"),
       refreshConversations(),
       refreshMemories(),
@@ -191,10 +191,10 @@ export default function Home() {
     ]);
     if (!toolsResponse.ok) throw new Error("Failed to load system status");
     setTools(await toolsResponse.json());
-    if (convs.length > 0) {
-      await loadConversation(convs[0].id);
-    }
-  }, [loadConversation, refreshConversations, refreshMemories, refreshNotebook]);
+    setActiveId(null);
+    setMessages([]);
+    setRightView("chat");
+  }, [refreshConversations, refreshMemories, refreshNotebook]);
 
   const refreshAutoProveRuns = useCallback(async () => {
     if (!user) {
@@ -718,6 +718,8 @@ export default function Home() {
             className={`toolNavItem ${rightView === "auto-prove" ? "active" : ""}`}
             onClick={() => {
               setAutoProveExpanded((value) => !value);
+              setSelectedAutoProveRunId(null);
+              setAutoProveRevision((value) => value + 1);
               setRightView("auto-prove");
               setError("");
             }}
