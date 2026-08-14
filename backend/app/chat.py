@@ -382,9 +382,16 @@ def build_user_turn(
     mode_label: str,
     depth_note: str,
     images: list[str] | None = None,
+    documents: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     question = message.strip() or "(see attached image(s))"
     text = f"Answer mode: {mode_label}{depth_note}\nQuestion: {question}"
+    if documents:
+        sources = "\n\n".join(
+            f"--- Attached document: {item['name']} ---\n{item['content']}"
+            for item in documents
+        )
+        text += f"\n\nUse these attached documents as source material:\n{sources}"
     if not images:
         return {"role": "user", "content": text}
     parts: list[dict[str, Any]] = [{"type": "input_text", "text": text}]
@@ -520,6 +527,7 @@ async def generate_answer(
     answer_mode: AnswerMode = "auto",
     teach_depth: TeachDepth = "full",
     images: list[str] | None = None,
+    documents: list[dict[str, str]] | None = None,
     status_emitter: StatusEmitter | None = None,
     delta_emitter: DeltaEmitter | None = None,
     reset_emitter: ResetEmitter | None = None,
@@ -552,6 +560,7 @@ async def generate_answer(
         if role in {"user", "assistant"} and content:
             input_items.append({"role": role, "content": content})
     mode_label = {
+        "general": "general mathematical conversation",
         "teach": "teaching",
         "solve": "problem-solving",
         "physics": "physics problem-solving",
@@ -564,6 +573,7 @@ async def generate_answer(
             mode_label=mode_label,
             depth_note=depth_note,
             images=images,
+            documents=documents,
         )
     )
 
@@ -648,6 +658,7 @@ async def answer(
     answer_mode: AnswerMode = "auto",
     teach_depth: TeachDepth = "full",
     images: list[str] | None = None,
+    documents: list[dict[str, str]] | None = None,
     status_emitter: StatusEmitter | None = None,
     delta_emitter: DeltaEmitter | None = None,
     reset_emitter: ResetEmitter | None = None,
@@ -660,6 +671,7 @@ async def answer(
         answer_mode=answer_mode,
         teach_depth=teach_depth,
         images=images,
+        documents=documents,
         status_emitter=status_emitter,
         delta_emitter=delta_emitter,
         reset_emitter=reset_emitter,

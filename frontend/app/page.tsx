@@ -2,6 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import ChatComposer from "./components/ChatComposer";
+import { type PendingDocument } from "./components/ChatComposer";
 import GoogleLogin from "./components/GoogleLogin";
 import ThinkingStatus, { LoadingStatus, streamChat } from "./components/ThinkingStatus";
 import LeanWorkbench, { type LeanRun } from "./components/LeanWorkbench";
@@ -45,7 +46,9 @@ type NotebookEntry = GuestNotebookEntry;
 
 type TeachDepth = "hint" | "socratic" | "full";
 
-type AnswerMode = "auto" | "teach" | "solve" | "research";
+type ImagePreview = { alt: string; src: string };
+
+type AnswerMode = "auto" | "general" | "teach" | "solve" | "research";
 type RightView = "chat" | "lean" | "auto-prove" | "notebook" | "memory";
 
 function formatTime(value: string): string {
@@ -72,6 +75,8 @@ function placeholderFor(mode: AnswerMode): string {
       return "Ask a problem to solve…";
     case "teach":
       return "Ask something you'd like to understand…";
+    case "general":
+      return "Ask a question…";
     case "research":
       return "Ask about the literature or open questions…";
     default:
@@ -91,6 +96,8 @@ export default function Home() {
   const [memories, setMemories] = useState<Memory[]>([]);
   const [input, setInput] = useState("");
   const [pendingImages, setPendingImages] = useState<string[]>([]);
+  const [imagePreview, setImagePreview] = useState<ImagePreview | null>(null);
+  const [pendingDocuments, setPendingDocuments] = useState<PendingDocument[]>([]);
   const [rightView, setRightView] = useState<RightView>("chat");
   const [leanExpanded, setLeanExpanded] = useState(false);
   const [leanRuns, setLeanRuns] = useState<LeanRun[]>([]);
@@ -114,6 +121,8 @@ export default function Home() {
   const [notebook, setNotebook] = useState<NotebookEntry[]>([]);
   const [conjectureDraft, setConjectureDraft] = useState("");
   const composerFormRef = useRef<HTMLFormElement>(null);
+  const activeRequestRef = useRef<AbortController | null>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
 
   const loadGuestWorkspaceIntoState = useCallback(() => {
     const workspace = loadGuestWorkspace();
@@ -435,7 +444,22 @@ export default function Home() {
     event.preventDefault();
     const question = input.trim();
     const images = [...pendingImages];
-    if ((!question && images.length === 0) || loading) return;
+    const documents = [...pendingDocuments];
+    if ((!question && images.length === 0 && documents.length === 0) || loading) return;
+
+    let extractedDocuments: { name: string; content: string }[];
+    try {
+      extractedDocuments = await Promise.all(documents.map(async ({ file }) => {
+        const form = new FormData();
+        form.append("file", file);
+        const response = await apiFetch("/api/chat/attachments/extract", { method: "POST", body: form });
+        if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail ?? `Could not read ${file.name}`);
+        return response.json() as Promise<{ name: string; content: string }>;
+      }));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not read the attachment");
+      return;
+    }
 
     let guestConversationId = activeId;
     if (!user && !guestConversationId) {
@@ -447,13 +471,21 @@ export default function Home() {
 
     setMessages((current) => [
       ...current,
-      { role: "user", content: question, images: images.length ? images : undefined },
+      { role: "user", content: [question, ...extractedDocuments.map((document) => `[Attached: ${document.name}]`)].filter(Boolean).join("\n"), images: images.length ? images : undefined },
     ]);
+    window.requestAnimationFrame(() => {
+      const userMessages = messagesRef.current?.querySelectorAll<HTMLElement>(".message.user");
+      const latestUserMessage = userMessages?.[userMessages.length - 1];
+      latestUserMessage?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
     setInput("");
     setPendingImages([]);
+    setPendingDocuments([]);
     setLoading(true);
     setLoadingStatus({ phase: "retrieving" });
     setError("");
+    const abortController = new AbortController();
+    activeRequestRef.current = abortController;
 
     let assistantStarted = false;
     const ensureAssistant = () => {
@@ -480,6 +512,7 @@ export default function Home() {
         {
           message: question,
           images,
+          documents: extractedDocuments,
           conversation_id: activeId,
           answer_mode: answerMode,
           teach_depth: teachDepth,
@@ -502,7 +535,9 @@ export default function Home() {
           },
         },
         user ? "/api/chat/stream" : "/api/chat/guest/stream",
+        { signal: abortController.signal },
       );
+      if (abortController.signal.aborted) return;
       if (user) setActiveId(data.conversation_id as string);
       if (assistantStarted) {
         patchAssistant(() => (data.answer as string) ?? "");
@@ -520,11 +555,24 @@ export default function Home() {
         setConversations((current) => current.map((item) => item.id === guestConversationId ? { ...item, updated_at: now } : item));
       }
     } catch (reason) {
+      if (abortController.signal.aborted) return;
       setError(reason instanceof Error ? reason.message : "Unknown error");
     } finally {
-      setLoading(false);
-      setLoadingStatus(null);
+      if (activeRequestRef.current === abortController) {
+        activeRequestRef.current = null;
+        setLoading(false);
+        setLoadingStatus(null);
+      }
     }
+  }
+
+  function stopGeneration() {
+    const activeRequest = activeRequestRef.current;
+    if (!activeRequest) return;
+    activeRequest.abort();
+    activeRequestRef.current = null;
+    setLoading(false);
+    setLoadingStatus(null);
   }
 
   const isEmptyChat = messages.length === 0;
@@ -536,9 +584,11 @@ export default function Home() {
         <ChatComposer
           disabled={loading}
           images={pendingImages}
+          documents={pendingDocuments}
           onChange={setInput}
           onEnterSubmit={() => composerFormRef.current?.requestSubmit()}
           onImagesChange={setPendingImages}
+          onDocumentsChange={setPendingDocuments}
           placeholder={placeholderFor(answerMode)}
           value={input}
         />
@@ -551,7 +601,7 @@ export default function Home() {
               options={ANSWER_MODE_OPTIONS}
               value={answerMode}
             />
-            {answerMode !== "research" && (
+            {(answerMode === "teach" || answerMode === "solve") && (
               <ModeDropdown
                 ariaLabel="Answer depth"
                 disabled={loading}
@@ -562,10 +612,11 @@ export default function Home() {
             )}
           </div>
           <button
-            disabled={loading || (!input.trim() && pendingImages.length === 0)}
-            type="submit"
+            disabled={!loading && (!input.trim() && pendingImages.length === 0 && pendingDocuments.length === 0)}
+            onClick={loading ? stopGeneration : undefined}
+            type={loading ? "button" : "submit"}
           >
-            Ask
+            {loading ? "Stop" : "Send"}
           </button>
         </div>
       </form>
@@ -784,7 +835,7 @@ export default function Home() {
         </div>
       </aside>
 
-      <section className="chatPanel">
+      <section className={`chatPanel ${rightView === "auto-prove" ? "pageScrollPanel" : ""} ${rightView === "chat" && !isEmptyChat ? "chatPageScroll" : ""}`}>
         {rightView === "lean" ? (
           <>
             {error && <p className="error leanError">{error}</p>}
@@ -867,7 +918,7 @@ export default function Home() {
               </div>
             ) : (
               <>
-                <div className="messages" aria-live="polite">
+                <div className="messages" aria-live="polite" ref={messagesRef}>
                   {switching ? (
                     <p className="thinking">Loading chat…</p>
                   ) : (
@@ -885,12 +936,16 @@ export default function Home() {
                               {message.images && message.images.length > 0 && (
                                 <div className="messageImages">
                                   {message.images.map((src, imageIndex) => (
-                                    // eslint-disable-next-line @next/next/no-img-element
-                                    <img
-                                      alt={`Uploaded ${imageIndex + 1}`}
+                                    <button
+                                      aria-label={`View uploaded image ${imageIndex + 1}`}
+                                      className="messageImageButton"
                                       key={`${message.id ?? index}-${imageIndex}`}
-                                      src={src}
-                                    />
+                                      onClick={() => setImagePreview({ alt: `Uploaded ${imageIndex + 1}`, src })}
+                                      type="button"
+                                    >
+                                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                                      <img alt={`Uploaded ${imageIndex + 1}`} src={src} />
+                                    </button>
                                   ))}
                                 </div>
                               )}
@@ -909,6 +964,29 @@ export default function Home() {
           </div>
         )}
       </section>
+      {imagePreview && (
+        <div
+          aria-label="Image preview"
+          className="imageLightbox"
+          onClick={() => setImagePreview(null)}
+          role="dialog"
+        >
+          <button
+            aria-label="Close image preview"
+            className="imageLightboxClose"
+            onClick={() => setImagePreview(null)}
+            type="button"
+          >
+            ×
+          </button>
+          <img
+            alt={imagePreview.alt}
+            className="imageLightboxImage"
+            onClick={(event) => event.stopPropagation()}
+            src={imagePreview.src}
+          />
+        </div>
+      )}
     </main>
   );
 }

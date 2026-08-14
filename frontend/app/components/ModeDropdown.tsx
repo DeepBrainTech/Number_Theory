@@ -92,7 +92,12 @@ export const ANSWER_MODE_OPTIONS: DropdownOption[] = [
   {
     value: "auto",
     label: "Auto",
-    description: "Pick teach, solve, or research automatically; can search the web and papers when needed.",
+    description: "Pick general, teach, solve, or research automatically from your request.",
+  },
+  {
+    value: "general",
+    label: "General",
+    description: "Direct conversational answers without a forced lesson structure.",
   },
   {
     value: "teach",

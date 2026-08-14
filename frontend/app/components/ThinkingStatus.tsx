@@ -61,6 +61,7 @@ export async function streamChat(
   body: Record<string, unknown>,
   handlers: StreamHandlers | ((status: LoadingStatus) => void) = {},
   path = "/api/chat/stream",
+  options: { signal?: AbortSignal } = {},
 ): Promise<Record<string, unknown>> {
   const resolved: StreamHandlers =
     typeof handlers === "function" ? { onStatus: handlers } : handlers;
@@ -70,6 +71,7 @@ export async function streamChat(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
     credentials: "include",
+    signal: options.signal,
   });
   if (!response.ok) throw new Error("Failed to get a reply");
 

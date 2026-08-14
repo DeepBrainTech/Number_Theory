@@ -4,8 +4,8 @@ import re
 from datetime import date
 from typing import Literal
 
-AnswerMode = Literal["auto", "teach", "solve", "physics", "research"]
-ResolvedMode = Literal["teach", "solve", "physics", "research"]
+AnswerMode = Literal["auto", "general", "teach", "solve", "physics", "research"]
+ResolvedMode = Literal["general", "teach", "solve", "physics", "research"]
 TeachDepth = Literal["hint", "socratic", "full"]
 
 RESEARCH_REQUIRED_HEADINGS = (
@@ -33,6 +33,15 @@ and other public web pages. Use the literature tools when the user asks about pa
 progress, or the state of the art — never invent bibliographic details from memory alone when a tool can confirm.
 For arXiv year/topic browsing, call literature_search or arxiv_search with a short natural-language
 query (topic + year, e.g. "mathematics 2026"). Do not hand-craft submittedDate syntax."""
+
+GENERAL_PROMPT = f"""You are a rigorous, conversational mathematics assistant in general-answer mode.
+{COMMON_RULES}
+
+Answer the user's question directly in their language. For short conceptual questions, start with
+the answer in one or two concise paragraphs, then add only the detail needed for clarity. Use
+headings, examples, or a list only when they genuinely help; do not impose a lesson plan or
+sections such as “Goal” and “Definition” by default. Do not add exercises, a study plan, or a
+long tutorial unless the user asks for them. Offer a deeper explanation only as an optional next step."""
 
 TEACH_PROMPT = f"""You are a rigorous mathematics teacher in teaching mode.
 {COMMON_RULES}
@@ -149,28 +158,28 @@ _SOLVE_PATTERNS = re.compile(
     r")\b|证明|求解|计算|求证|判断|分解|验证)"
 )
 
-_TEACH_PATTERNS = re.compile(
-    r"(?i)(\b(?:"
-    r"explain|what\s+is|what\s+are|why|intuition|hint|help\s+me\s+understand|"
-    r"introduce|overview|difference\s+between"
-    r")\b|解释|为什么|是什么|直觉|提示|帮我理解|介绍|区别)"
+_EXPLICIT_TEACH_PATTERNS = re.compile(
+    r"(?i)(\b(?:teach\s+me|walk\s+me\s+through|step\s+by\s+step|tutorial|lesson|"
+    r"practice\s+exercises?|study\s+plan|help\s+me\s+learn|detailed\s+explanation)\b|"
+    r"\u6559\u6211|\u5e26\u6211\u5b66|\u4e00\u6b65\u6b65|\u8be6\u7ec6\u8bb2\u89e3|"
+    r"\u7cfb\u7edf\u8bb2\u89e3|\u8bfe\u7a0b|\u7ec3\u4e60\u9898|\u5b66\u4e60\u8ba1\u5212)"
 )
 
 
 def resolve_answer_mode(message: str, requested: AnswerMode = "auto") -> ResolvedMode:
-    if requested in {"teach", "solve", "physics", "research"}:
+    if requested in {"general", "teach", "solve", "physics", "research"}:
         return requested
     if _RESEARCH_PATTERNS.search(message):
         return "research"
     if _PHYSICS_PATTERNS.search(message):
         return "physics"
-    if _SOLVE_PATTERNS.search(message) and not _TEACH_PATTERNS.search(message):
+    if _SOLVE_PATTERNS.search(message) and not _EXPLICIT_TEACH_PATTERNS.search(message):
         return "solve"
-    if _TEACH_PATTERNS.search(message) and not _SOLVE_PATTERNS.search(message):
+    if _EXPLICIT_TEACH_PATTERNS.search(message) and not _SOLVE_PATTERNS.search(message):
         return "teach"
     if _SOLVE_PATTERNS.search(message):
         return "solve"
-    return "teach"
+    return "general"
 
 
 def _date_context() -> str:
@@ -186,8 +195,16 @@ def system_prompt_for(mode: ResolvedMode, teach_depth: TeachDepth = "full") -> s
     date_ctx = _date_context()
     if mode == "research":
         return RESEARCH_PROMPT + date_ctx
-    base = TEACH_PROMPT if mode == "teach" else PHYSICS_PROMPT if mode == "physics" else SOLVE_PROMPT
-    if mode in {"teach", "physics"} or teach_depth != "full":
+    base = (
+        GENERAL_PROMPT
+        if mode == "general"
+        else TEACH_PROMPT
+        if mode == "teach"
+        else PHYSICS_PROMPT
+        if mode == "physics"
+        else SOLVE_PROMPT
+    )
+    if mode in {"teach", "physics"} or (mode == "solve" and teach_depth != "full"):
         return base + DEPTH_INSTRUCTIONS.get(teach_depth, "") + date_ctx
     return base + date_ctx
 

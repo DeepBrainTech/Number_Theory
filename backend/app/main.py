@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import zipfile
 from io import BytesIO
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from typing import Any
+from xml.etree import ElementTree
 
 from fastapi import Depends, FastAPI, File, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -60,6 +62,7 @@ from .memory import (
 from .notebook import create_entry, delete_entry, export_notebook, list_entries
 from .schemas import (
     ChatRequest,
+    ChatDocument,
     GuestChatRequest,
     ChatResponse,
     ConversationCreate,
@@ -231,7 +234,9 @@ def _prepare_chat(request: ChatRequest) -> tuple[str, list[dict[str, str]], list
     memories = memory_texts(request.client_id)
     is_first_turn = message_count(conversation_id) == 0
     images = validate_images(request.images)
-    user_text = request.message.strip()
+    user_text = request.message.strip() or "\n".join(
+        f"[Attached document: {document.name}]" for document in request.documents
+    )
     add_message(conversation_id, "user", user_text, attachments=images)
     return conversation_id, history, memories, images, user_text, is_first_turn
 
@@ -246,7 +251,7 @@ def _chat_response(
     teach_depth: str,
     new_memories: list[dict[str, Any]] | None = None,
 ) -> ChatResponse:
-    answer_mode = mode if mode in {"teach", "solve", "physics", "research", "retrieval"} else "teach"
+    answer_mode = mode if mode in {"general", "teach", "solve", "physics", "research", "retrieval"} else "general"
     return ChatResponse(
         answer=content,
         mode=mode,
@@ -291,6 +296,7 @@ async def execute_chat(request: ChatRequest, status_emitter: StatusEmitter | Non
         answer_mode=request.answer_mode,
         teach_depth=request.teach_depth,
         images=images or None,
+        documents=[document.model_dump() for document in request.documents] or None,
         status_emitter=status_emitter,
     )
 
@@ -373,6 +379,7 @@ async def chat_stream_api(
                     answer_mode=request.answer_mode,
                     teach_depth=request.teach_depth,
                     images=images or None,
+                    documents=[document.model_dump() for document in request.documents] or None,
                     status_emitter=on_status,
                     delta_emitter=on_delta,
                     reset_emitter=on_reset,
@@ -459,14 +466,19 @@ async def chat_stream_api(
                 await queue.put(None)
 
         task = asyncio.create_task(worker())
+        stream_finished = False
         try:
             while True:
                 item = await queue.get()
                 if item is None:
+                    stream_finished = True
                     break
                 yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
         finally:
-            await task
+            if not stream_finished and not task.done():
+                task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
     return StreamingResponse(
         event_stream(),
@@ -571,6 +583,43 @@ def _serialize_run(row: dict[str, Any]) -> AutoProveRunOut:
 _REFERENCE_FILE_LIMIT = 3 * 1024 * 1024
 _REFERENCE_TEXT_LIMIT = 60_000
 _REFERENCE_EXTENSIONS = {".txt", ".md", ".tex", ".bib", ".csv", ".json", ".pdf"}
+_CHAT_DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
+
+
+def _extract_chat_document(name: str, raw: bytes) -> str:
+    suffix = "." + name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    if suffix == ".pdf":
+        from pypdf import PdfReader
+
+        reader = PdfReader(BytesIO(raw))
+        content = "\n\n".join(page.extract_text() or "" for page in reader.pages)
+    elif suffix == ".docx":
+        with zipfile.ZipFile(BytesIO(raw)) as document:
+            root = ElementTree.fromstring(document.read("word/document.xml"))
+        content = "\n".join(text.strip() for text in root.itertext() if text.strip())
+    else:
+        content = raw.decode("utf-8", errors="replace")
+    content = content.strip()
+    if not content:
+        raise ValueError("No readable text was found")
+    return content[:_REFERENCE_TEXT_LIMIT]
+
+
+@app.post("/api/chat/attachments/extract", response_model=ChatDocument)
+async def chat_attachment_extract_api(file: UploadFile = File(...)) -> ChatDocument:
+    """Extract bounded text from a document for the next chat turn."""
+    name = (file.filename or "attachment").replace("\\", "/").split("/")[-1]
+    suffix = "." + name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    if suffix not in _CHAT_DOCUMENT_EXTENSIONS:
+        raise HTTPException(status_code=415, detail="Use a PDF, Word (.docx), TXT, or Markdown file")
+    raw = await file.read(_REFERENCE_FILE_LIMIT + 1)
+    if len(raw) > _REFERENCE_FILE_LIMIT:
+        raise HTTPException(status_code=413, detail="Each attachment must be 3 MB or smaller")
+    try:
+        content = _extract_chat_document(name, raw)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="This attachment could not be read as text") from exc
+    return ChatDocument(name=name[:180], content=content)
 
 
 @app.post("/api/auto-prove/references/extract", response_model=AutoProveReference)
@@ -775,6 +824,7 @@ async def guest_chat_stream_api(request: GuestChatRequest) -> StreamingResponse:
                     answer_mode=request.answer_mode,
                     teach_depth=request.teach_depth,
                     images=validate_images(request.images) or None,
+                    documents=[document.model_dump() for document in request.documents] or None,
                     status_emitter=on_status,
                     delta_emitter=on_delta,
                     reset_emitter=on_reset,
@@ -802,12 +852,20 @@ async def guest_chat_stream_api(request: GuestChatRequest) -> StreamingResponse:
             finally:
                 await queue.put(None)
 
-        asyncio.create_task(worker())
-        while True:
-            item = await queue.get()
-            if item is None:
-                break
-            yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+        task = asyncio.create_task(worker())
+        stream_finished = False
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    stream_finished = True
+                    break
+                yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+        finally:
+            if not stream_finished and not task.done():
+                task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
     return StreamingResponse(event_stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
 

@@ -15,7 +15,7 @@ class ToolsForTests(unittest.TestCase):
             "literature_search",
             "oeis_search",
         }
-        for mode in ("teach", "solve", "physics", "research"):
+        for mode in ("general", "teach", "solve", "physics", "research"):
             tools = tools_for(mode)
             names = {tool["name"] for tool in tools if "name" in tool}
             types = {tool["type"] for tool in tools}
@@ -35,6 +35,19 @@ class PhysicsModeTests(unittest.TestCase):
         prompt = system_prompt_for("physics")
         self.assertIn("Known quantities & units", prompt)
         self.assertIn("check dimensions", prompt)
+
+
+class GeneralModeTests(unittest.TestCase):
+    def test_auto_uses_general_for_concept_questions(self) -> None:
+        self.assertEqual(resolve_answer_mode("What is number theory?"), "general")
+
+    def test_auto_uses_teach_for_explicit_teaching_request(self) -> None:
+        self.assertEqual(resolve_answer_mode("Teach me number theory step by step."), "teach")
+
+    def test_general_prompt_has_no_forced_lesson_template(self) -> None:
+        prompt = system_prompt_for("general")
+        self.assertIn("do not impose a lesson plan", prompt)
+        self.assertNotIn("Teaching template", prompt)
 
 
 class HostedWebSearchTests(unittest.TestCase):
