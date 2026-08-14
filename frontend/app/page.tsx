@@ -105,6 +105,7 @@ export default function Home() {
   const [selectedLeanRunId, setSelectedLeanRunId] = useState<number | null>(null);
   const [autoProveExpanded, setAutoProveExpanded] = useState(false);
   const [selectedAutoProveRunId, setSelectedAutoProveRunId] = useState<string | null>(null);
+  const [autoProveDraftKey, setAutoProveDraftKey] = useState(0);
   const [answerMode, setAnswerMode] = useState<AnswerMode>("auto");
   const [teachDepth, setTeachDepth] = useState<TeachDepth>("full");
   const [memoryDraft, setMemoryDraft] = useState("");
@@ -251,6 +252,14 @@ export default function Home() {
       notebook,
     });
   }, [activeId, conversations, guestMode, guestStorageReady, memories, messages, notebook, user]);
+
+  async function startNewProve() {
+    setAutoProveExpanded(true);
+    setSelectedAutoProveRunId(null);
+    setAutoProveDraftKey((value) => value + 1);
+    setRightView("auto-prove");
+    setError("");
+  }
 
   async function startNewChat() {
     if (loading) return;
@@ -708,7 +717,6 @@ export default function Home() {
             className={`toolNavItem ${rightView === "auto-prove" ? "active" : ""}`}
             onClick={() => {
               setAutoProveExpanded((value) => !value);
-              setSelectedAutoProveRunId(null);
               setRightView("auto-prove");
               setError("");
             }}
@@ -720,8 +728,20 @@ export default function Home() {
           </button>
           {autoProveExpanded && (
             <div className="autoProveNavRuns" aria-label="Saved Auto Prove runs">
+              <div
+                className={`conversationItem ${
+                  rightView === "auto-prove" && selectedAutoProveRunId === null ? "active" : ""
+                }`}
+              >
+                <button
+                  className="conversationMain"
+                  onClick={() => void startNewProve()}
+                  type="button"
+                >
+                  <span className="conversationTitle">New proof</span>
+                </button>
+              </div>
               {!user && <p className="emptyHint">Sign in to view saved runs</p>}
-              {user && prove.runs.length === 0 && <p className="emptyHint">No proof runs yet</p>}
               {prove.runs.map((run) => (
                 <div
                   className={`conversationItem ${
@@ -833,6 +853,7 @@ export default function Home() {
         <div hidden={rightView !== "auto-prove"}>
           {error && <p className="error toolPanelError">{error}</p>}
           <AutoProve
+            key={autoProveDraftKey}
             apiBase={API_BASE}
             authenticated={Boolean(user)}
             modelConfigured={Boolean(tools?.deepseek?.configured)}
