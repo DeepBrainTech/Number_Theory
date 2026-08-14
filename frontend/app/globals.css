@@ -629,6 +629,8 @@ textarea {
   margin-top: 24px;
 }
 
+.autoProveExportSource { display: none; }
+
 .autoProveControls {
   align-items: center;
   display: flex;
@@ -756,6 +758,10 @@ textarea {
 .autoProveResearch button.secondary { background: transparent; border: 1px solid var(--green); color: var(--green); margin-left: 8px; }
 .autoProveResult, .autoProveReview, .autoProvePlan { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; margin-top: 18px; padding: 18px 20px; }
 .autoProveResult h3 { font-family: Georgia, serif; margin: 0 0 14px; }
+.autoProveResultHead { align-items: center; display: flex; gap: 12px; justify-content: space-between; }
+.autoProveResultHead h3 { margin: 0; }
+.autoProveDownload { background: transparent; border: 1px solid var(--green); border-radius: 8px; color: var(--green); cursor: pointer; flex-shrink: 0; font-weight: 700; padding: 7px 11px; }
+.autoProveDownload:hover { background: var(--green-soft); }
 .autoProveReview { color: var(--muted); font-size: 13px; }
 .autoProveReview p, .autoProveReview ul { line-height: 1.65; margin-bottom: 0; }
 .autoProvePlan summary { color: var(--green); cursor: pointer; font-weight: 700; }

@@ -57,6 +57,15 @@ function formatElapsed(seconds: number): string {
   return minutes ? `${minutes}m${remainder}s` : `${remainder}s`;
 }
 
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
 export default function AutoProve({
   apiBase,
   modelConfigured,
@@ -83,6 +92,57 @@ export default function AutoProve({
   const controller = useRef<AbortController | null>(null);
   const referenceInput = useRef<HTMLInputElement | null>(null);
   const runStartedAt = useRef<number | null>(null);
+  const proofExportContent = useRef<HTMLDivElement | null>(null);
+  const problemExportContent = useRef<HTMLDivElement | null>(null);
+
+  function downloadProofHtml() {
+    if (!result?.proof || !proofExportContent.current || !problemExportContent.current) return;
+
+    const title = "Proof Lab — Auto Prove result";
+    const exportedAt = new Date().toLocaleString();
+    const documentHtml = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${title}</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.18.1/dist/katex.min.css">
+  <style>
+    body { background: #f5f2e9; color: #13241d; font: 16px/1.75 Inter, "Noto Sans SC", "Microsoft YaHei", sans-serif; margin: 0; }
+    main { background: #fffdf7; border: 1px solid #dedbd0; border-radius: 14px; margin: 32px auto; max-width: 900px; padding: 32px; }
+    h1 { font-family: Georgia, "Noto Serif SC", serif; font-size: 28px; margin: 0 0 8px; }
+    h2 { font-family: Georgia, "Noto Serif SC", serif; font-size: 22px; margin: 28px 0 12px; }
+    .meta { color: #66726d; font-size: 13px; margin: 0; }
+    .problem { background: #f5f2e9; border-radius: 10px; margin-top: 20px; padding: 16px; white-space: pre-wrap; }
+    .mathMarkdown p, .mathMarkdown ul, .mathMarkdown ol { margin: 0 0 .85em; }
+    .mathMarkdown .katex-display, pre { overflow-x: auto; }
+    pre { background: #efece3; border-radius: 6px; padding: 12px 14px; }
+    @media print { body { background: #fff; } main { border: 0; margin: 0; max-width: none; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Auto Prove result</h1>
+    <p class="meta">Exported from Proof Lab on ${escapeHtml(exportedAt)}</p>
+    <section class="problem">
+      <h2>Problem</h2>
+      ${problemExportContent.current.innerHTML}
+    </section>
+    <section>
+      <h2>Proof${result.passed === false ? " (best attempt)" : ""}</h2>
+      ${proofExportContent.current.innerHTML}
+    </section>
+  </main>
+</body>
+</html>`;
+    const file = new Blob([documentHtml], { type: "text/html;charset=utf-8" });
+    const url = URL.createObjectURL(file);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `proof-lab-${result.run_id ?? "proof"}.html`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
 
   useEffect(() => {
     if (!busy) {
@@ -333,6 +393,9 @@ export default function AutoProve({
       <form className="autoProveForm" onSubmit={run}>
         <LatexField apiBase={apiBase} disabled={busy} label="Problem to prove (LaTeX format)" modelConfigured={modelConfigured} showPasteHint={false}
           onChange={setProblem} placeholder="State a theorem or exercise precisely. LaTex is supported." rows={8} value={problem} />
+        <div aria-hidden="true" className="autoProveExportSource" ref={problemExportContent}>
+          <MathMarkdown content={problem} />
+        </div>
         <div className="autoProveReferences">
           <label htmlFor="auto-prove-guidance">Research guidance, conjectures, and links (optional)</label>
           <p>Give the agents a direction, a counterexample lead, or paper URLs. Attach readable source files below; they are saved with this run.</p>
@@ -389,7 +452,15 @@ export default function AutoProve({
         {canResume && <button className="secondary" onClick={() => void run({ preventDefault() {} } as FormEvent, true)} type="button">Resume from checkpoint</button>}
       </div>}
       {result?.error && <p className="error">{result.error}</p>}
-      {result?.proof && <div className="autoProveResult"><h3>Proof{result.passed === false ? " (best attempt)" : ""}</h3><MathMarkdown content={result.proof} /></div>}
+      {result?.proof && (
+        <div className="autoProveResult">
+          <div className="autoProveResultHead">
+            <h3>Proof{result.passed === false ? " (best attempt)" : ""}</h3>
+            <button className="autoProveDownload" onClick={downloadProofHtml} type="button">Download HTML</button>
+          </div>
+          <div ref={proofExportContent}><MathMarkdown content={result.proof} /></div>
+        </div>
+      )}
       {result?.review && result.review.length > 0 && <div className="autoProveReview"><strong>Remaining referee notes</strong><ul>{result.review.map((item) => <li key={item}>{item}</li>)}</ul></div>}
       {(result?.difficulty || result?.run_id) && (
         <div className="autoProveReview">
