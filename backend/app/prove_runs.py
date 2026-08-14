@@ -32,6 +32,10 @@ def create_run(
             )
             VALUES (%s, %s, %s, %s, %s, %s, 'running', 'starting')
             ON CONFLICT (run_id) DO UPDATE SET
+                status = 'running',
+                phase = 'starting',
+                current_tool = '',
+                error = NULL,
                 updated_at = NOW()
             RETURNING
                 {_RUN_COLUMNS}

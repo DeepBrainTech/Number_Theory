@@ -198,14 +198,18 @@ export default function AutoProve({
       onError?.("DEEPSEEK_API_KEY is required for Auto Prove.");
       return;
     }
+    const reuseRun = Boolean(
+      activeRunId
+      && (resume || selected?.status === "cancelled" || selected?.status === "failed"),
+    );
     await onProve({
       problem: problem.trim(),
       guidance: guidance.trim(),
       references,
       depth,
       formalize,
-      run_id: resume ? activeRunId : null,
-      resume,
+      run_id: reuseRun ? activeRunId : null,
+      resume: reuseRun,
     });
   }
 

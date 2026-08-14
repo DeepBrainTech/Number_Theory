@@ -303,6 +303,13 @@ export function useAutoProveSession(options: {
       delete next[id];
       return next;
     });
+    setRuns((current) =>
+      current.map((run) => (
+        run.run_id === id
+          ? { ...run, status: "cancelled", phase: "cancelled", current_tool: "", error: "Cancelled by user" }
+          : run
+      )),
+    );
     setStarting(false);
     void refreshRuns();
   }, [onError, refreshRuns]);
