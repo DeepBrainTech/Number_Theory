@@ -7,6 +7,7 @@ import GoogleLogin from "./components/GoogleLogin";
 import ThinkingStatus, { LoadingStatus, streamChat } from "./components/ThinkingStatus";
 import LeanWorkbench, { type LeanRun } from "./components/LeanWorkbench";
 import AutoProve, { type SavedRun } from "./components/AutoProve";
+import { useAutoProveSession } from "./lib/useAutoProveSession";
 import ModeDropdown, { ANSWER_MODE_OPTIONS, TEACH_DEPTH_OPTIONS } from "./components/ModeDropdown";
 import MathMarkdown from "./components/MathMarkdown";
 import MemoryPanel from "./components/MemoryPanel";
@@ -103,9 +104,7 @@ export default function Home() {
   const [leanRuns, setLeanRuns] = useState<LeanRun[]>([]);
   const [selectedLeanRunId, setSelectedLeanRunId] = useState<number | null>(null);
   const [autoProveExpanded, setAutoProveExpanded] = useState(false);
-  const [autoProveRuns, setAutoProveRuns] = useState<SavedRun[]>([]);
   const [selectedAutoProveRunId, setSelectedAutoProveRunId] = useState<string | null>(null);
-  const [autoProveRevision, setAutoProveRevision] = useState(0);
   const [answerMode, setAnswerMode] = useState<AnswerMode>("auto");
   const [teachDepth, setTeachDepth] = useState<TeachDepth>("full");
   const [memoryDraft, setMemoryDraft] = useState("");
@@ -123,6 +122,7 @@ export default function Home() {
   const composerFormRef = useRef<HTMLFormElement>(null);
   const activeRequestRef = useRef<AbortController | null>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
+  const prove = useAutoProveSession({ authenticated: Boolean(user), onError: setError });
 
   const loadGuestWorkspaceIntoState = useCallback(() => {
     const workspace = loadGuestWorkspace();
@@ -196,18 +196,9 @@ export default function Home() {
     setRightView("chat");
   }, [refreshConversations, refreshMemories, refreshNotebook]);
 
-  const refreshAutoProveRuns = useCallback(async () => {
-    if (!user) {
-      setAutoProveRuns([]);
-      return;
-    }
-    const response = await apiFetch("/api/auto-prove/runs");
-    if (response.ok) setAutoProveRuns(await response.json() as SavedRun[]);
-  }, [user]);
-
   useEffect(() => {
-    void refreshAutoProveRuns();
-  }, [refreshAutoProveRuns]);
+    if (prove.startingRunId) setSelectedAutoProveRunId(prove.startingRunId);
+  }, [prove.startingRunId]);
 
   const deleteAutoProveRun = useCallback(async (run: SavedRun) => {
     if (run.status === "running") {
@@ -223,12 +214,11 @@ export default function Home() {
       setError(detail?.detail || "Could not delete the Auto Prove run.");
       return;
     }
-    setAutoProveRuns((runs) => runs.filter((item) => item.run_id !== run.run_id));
+    void prove.refreshRuns();
     if (selectedAutoProveRunId === run.run_id) {
       setSelectedAutoProveRunId(null);
-      setAutoProveRevision((value) => value + 1);
     }
-  }, [selectedAutoProveRunId]);
+  }, [prove, selectedAutoProveRunId]);
 
   useEffect(() => {
     apiFetch("/api/auth/me")
@@ -719,7 +709,6 @@ export default function Home() {
             onClick={() => {
               setAutoProveExpanded((value) => !value);
               setSelectedAutoProveRunId(null);
-              setAutoProveRevision((value) => value + 1);
               setRightView("auto-prove");
               setError("");
             }}
@@ -732,8 +721,8 @@ export default function Home() {
           {autoProveExpanded && (
             <div className="autoProveNavRuns" aria-label="Saved Auto Prove runs">
               {!user && <p className="emptyHint">Sign in to view saved runs</p>}
-              {user && autoProveRuns.length === 0 && <p className="emptyHint">No proof runs yet</p>}
-              {autoProveRuns.map((run) => (
+              {user && prove.runs.length === 0 && <p className="emptyHint">No proof runs yet</p>}
+              {prove.runs.map((run) => (
                 <div
                   className={`conversationItem ${
                     rightView === "auto-prove" && selectedAutoProveRunId === run.run_id ? "active" : ""
@@ -750,7 +739,10 @@ export default function Home() {
                     title={`Auto Prove run: ${run.status}`}
                     type="button"
                   >
-                    <span className="conversationTitle">{autoProveTitle(run.problem)}</span>
+                    <span className="conversationTitle">
+                      {autoProveTitle(run.problem)}
+                      {(run.status === "running" || prove.liveById[run.run_id]) ? " · running" : ""}
+                    </span>
                   </button>
                   <button
                     aria-label="Delete Auto Prove run"
@@ -838,6 +830,24 @@ export default function Home() {
       </aside>
 
       <section className={`chatPanel ${rightView === "auto-prove" ? "pageScrollPanel" : ""} ${rightView === "chat" && !isEmptyChat ? "chatPageScroll" : ""}`}>
+        <div hidden={rightView !== "auto-prove"}>
+          {error && <p className="error toolPanelError">{error}</p>}
+          <AutoProve
+            apiBase={API_BASE}
+            authenticated={Boolean(user)}
+            modelConfigured={Boolean(tools?.deepseek?.configured)}
+            selectedRunId={selectedAutoProveRunId}
+            runs={prove.runs}
+            live={selectedAutoProveRunId ? prove.liveById[selectedAutoProveRunId] ?? null : null}
+            result={selectedAutoProveRunId ? prove.resultsById[selectedAutoProveRunId] ?? null : null}
+            artifacts={selectedAutoProveRunId ? prove.artifactsById[selectedAutoProveRunId] ?? null : null}
+            starting={prove.starting && (!selectedAutoProveRunId || selectedAutoProveRunId === prove.startingRunId)}
+            onProve={prove.startProve}
+            onCancel={prove.cancelProve}
+            onOpenRun={prove.openRun}
+            onError={setError}
+          />
+        </div>
         {rightView === "lean" ? (
           <>
             {error && <p className="error leanError">{error}</p>}
@@ -859,20 +869,7 @@ export default function Home() {
               onError={setError}
             />
           </>
-        ) : rightView === "auto-prove" ? (
-          <>
-            {error && <p className="error toolPanelError">{error}</p>}
-            <AutoProve
-              key={autoProveRevision}
-              apiBase={API_BASE}
-              authenticated={Boolean(user)}
-              modelConfigured={Boolean(tools?.deepseek?.configured)}
-              onRunsChange={setAutoProveRuns}
-              selectedRunId={selectedAutoProveRunId}
-              onError={setError}
-            />
-          </>
-        ) : rightView === "notebook" ? (
+        ) : rightView === "auto-prove" ? null : rightView === "notebook" ? (
           <>
             {error && <p className="error toolPanelError">{error}</p>}
             <NotebookPanel

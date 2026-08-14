@@ -1,3 +1,5 @@
+import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,7 +21,11 @@ from app.auto_prove import (
     parse_difficulty,
     parse_regulator_decision,
     parse_verdict,
+    publish_run_event,
     request_cancel,
+    run_artifacts,
+    subscribe_run_events,
+    unsubscribe_run_events,
 )
 from app.prove_prompts import load_prompt, qed_prompt, skill_text
 
@@ -130,6 +136,19 @@ class RunStoreTests(unittest.TestCase):
                 store.log("hello")
                 self.assertIn("hello", (store.root / "log.txt").read_text(encoding="utf-8"))
 
+    def test_in_progress_proof_is_not_a_finished_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("app.auto_prove.settings") as settings:
+                settings.auto_prove_runs_dir = Path(tmp)
+                run_id, store = RunStore.create("abcd1234efef")
+                store.write("proof.md", "Draft proof.")
+                report = run_artifacts(run_id)
+                self.assertIsNone(report["result"])
+                store.write("result.json", json.dumps({"ok": True, "passed": True}))
+                report = run_artifacts(run_id)
+                self.assertTrue(report["result"]["ok"])
+                self.assertEqual(report["result"]["proof"].strip(), "Draft proof.")
+
 
 class CancelRegistryTests(unittest.IsolatedAsyncioTestCase):
     async def test_request_cancel_sets_event_and_raises_on_check(self) -> None:
@@ -152,6 +171,17 @@ class CancelRegistryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(result["ok"])
                 self.assertIn("Cancelled", result["error"])
                 self.assertIn("Cancelled", store.read("STATUS.md"))
+
+
+class RunEventBusTests(unittest.IsolatedAsyncioTestCase):
+    async def test_publish_reaches_subscriber(self) -> None:
+        queue = subscribe_run_events("abcd1234efef")
+        try:
+            await publish_run_event("abcd1234efef", {"type": "status", "phase": "tool", "tool": "web_search"})
+            event = await asyncio.wait_for(queue.get(), timeout=1)
+            self.assertEqual(event["tool"], "web_search")
+        finally:
+            unsubscribe_run_events("abcd1234efef", queue)
 
 
 if __name__ == "__main__":

@@ -96,6 +96,7 @@ SCHEMA_STATEMENTS = [
         formalize BOOLEAN NOT NULL DEFAULT FALSE,
         status TEXT NOT NULL DEFAULT 'running',
         phase TEXT NOT NULL DEFAULT '',
+        current_tool TEXT NOT NULL DEFAULT '',
         difficulty TEXT,
         passed BOOLEAN,
         proof_attempts INT NOT NULL DEFAULT 0,
@@ -109,6 +110,10 @@ SCHEMA_STATEMENTS = [
     """
     CREATE INDEX IF NOT EXISTS auto_prove_runs_client_idx
         ON auto_prove_runs(client_id, updated_at DESC)
+    """,
+    """
+    ALTER TABLE auto_prove_runs
+        ADD COLUMN IF NOT EXISTS current_tool TEXT NOT NULL DEFAULT ''
     """,
     """
     CREATE TABLE IF NOT EXISTS lean_workbench_states (

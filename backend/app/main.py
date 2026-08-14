@@ -33,7 +33,16 @@ from .auth import (
 from .config import settings
 from .formalize import generate_proof_draft, propose_statement, verify_statement
 from .lean_workspace import create_run as create_lean_run, get_run as get_lean_run, get_workspace, list_runs as list_lean_runs, save_workspace
-from .auto_prove import add_human_guidance, delete_run_artifacts, mark_run_cancelled, request_cancel, run_artifacts, run_auto_prove
+from .auto_prove import (
+    add_human_guidance,
+    delete_run_artifacts,
+    mark_run_cancelled,
+    request_cancel,
+    run_artifacts,
+    run_auto_prove,
+    subscribe_run_events,
+    unsubscribe_run_events,
+)
 from .prove_runs import delete_run, get_run, list_runs, owned_run_id
 from .gating import gate_answer
 from .latex_ocr import image_to_latex
@@ -558,6 +567,26 @@ async def formalize_verify_api(
 
 
 _active_auto_prove_tasks: set[asyncio.Task[Any]] = set()
+_SSE_KEEPALIVE_SECONDS = 15
+
+
+def _sse_data(payload: dict[str, Any]) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+async def _sse_from_queue(queue: asyncio.Queue[dict[str, Any] | None]):
+    """Yield SSE packets, with keepalives so proxies do not drop idle runs."""
+    while True:
+        try:
+            item = await asyncio.wait_for(queue.get(), timeout=_SSE_KEEPALIVE_SECONDS)
+        except asyncio.TimeoutError:
+            yield ": keepalive\n\n"
+            continue
+        if item is None:
+            break
+        yield _sse_data(item)
+        if item.get("type") == "result":
+            break
 
 
 def _serialize_run(row: dict[str, Any]) -> AutoProveRunOut:
@@ -569,6 +598,7 @@ def _serialize_run(row: dict[str, Any]) -> AutoProveRunOut:
         formalize=bool(row.get("formalize")),
         status=row["status"],
         phase=row.get("phase") or "",
+        current_tool=row.get("current_tool") or "",
         difficulty=row.get("difficulty"),
         passed=row.get("passed"),
         proof_attempts=int(row.get("proof_attempts") or 0),
@@ -783,15 +813,82 @@ async def auto_prove_stream_api(
         task = asyncio.create_task(worker())
         _active_auto_prove_tasks.add(task)
         try:
-            while True:
-                item = await queue.get()
-                if item is None:
-                    break
-                yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+            async for packet in _sse_from_queue(queue):
+                yield packet
         finally:
             # Closing a browser tab must not throw away a potentially long
             # research run. Its checkpoint and artifacts remain queryable.
             pass
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/api/auto-prove/runs/{run_id}/events")
+async def auto_prove_run_events_api(
+    run_id: str,
+    user: dict[str, Any] = Depends(current_user),
+) -> StreamingResponse:
+    """Resubscribe to an in-flight Auto Prove run after the original tab closed."""
+    meta = get_run(run_id, user["id"])
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Auto Prove run not found")
+    owner_id = user["id"]
+
+    async def event_stream():
+        latest = get_run(run_id, owner_id)
+        if latest is None:
+            yield _sse_data({"type": "result", "ok": False, "error": "Auto Prove run not found", "run_id": run_id})
+            return
+        snapshot = {
+            "type": "snapshot",
+            "run_id": run_id,
+            **_serialize_run(latest).model_dump(mode="json"),
+        }
+        yield _sse_data(snapshot)
+        if latest["status"] != "running":
+            report = run_artifacts(run_id) or {}
+            result = report.get("result") or {
+                "ok": latest["status"] != "failed",
+                "error": latest.get("error"),
+                "run_id": run_id,
+            }
+            yield _sse_data({"type": "result", **result, "run_id": run_id})
+            return
+
+        queue = subscribe_run_events(run_id)
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=_SSE_KEEPALIVE_SECONDS)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    current = get_run(run_id, owner_id)
+                    if current is None or current["status"] != "running":
+                        if current is not None:
+                            yield _sse_data({
+                                "type": "snapshot",
+                                "run_id": run_id,
+                                **_serialize_run(current).model_dump(mode="json"),
+                            })
+                        report = run_artifacts(run_id) or {}
+                        result = report.get("result") or {
+                            "ok": bool(current) and current["status"] == "complete",
+                            "error": (current or {}).get("error"),
+                            "run_id": run_id,
+                        }
+                        yield _sse_data({"type": "result", **result, "run_id": run_id})
+                        break
+                    yield _sse_data({
+                        "type": "snapshot",
+                        "run_id": run_id,
+                        **_serialize_run(current).model_dump(mode="json"),
+                    })
+                    continue
+                yield _sse_data(item)
+                if item.get("type") == "result":
+                    break
+        finally:
+            unsubscribe_run_events(run_id, queue)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
 

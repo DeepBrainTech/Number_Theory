@@ -224,6 +224,7 @@ class AutoProveRunOut(BaseModel):
     formalize: bool = False
     status: str
     phase: str = ""
+    current_tool: str = ""
     difficulty: str | None = None
     passed: bool | None = None
     proof_attempts: int = 0

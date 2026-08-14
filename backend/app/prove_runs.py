@@ -7,6 +7,14 @@ from typing import Any
 from .db import connection
 
 
+_RUN_COLUMNS = """
+    run_id, client_id, problem, guidance, depth, formalize,
+    status, phase, current_tool, difficulty, passed,
+    proof_attempts, revisions, decompositions, error,
+    created_at, updated_at
+"""
+
+
 def create_run(
     *,
     run_id: str,
@@ -18,7 +26,7 @@ def create_run(
 ) -> dict[str, Any]:
     with connection() as conn:
         row = conn.execute(
-            """
+            f"""
             INSERT INTO auto_prove_runs (
                 run_id, client_id, problem, guidance, depth, formalize, status, phase
             )
@@ -26,10 +34,7 @@ def create_run(
             ON CONFLICT (run_id) DO UPDATE SET
                 updated_at = NOW()
             RETURNING
-                run_id, client_id, problem, guidance, depth, formalize,
-                status, phase, difficulty, passed,
-                proof_attempts, revisions, decompositions, error,
-                created_at, updated_at
+                {_RUN_COLUMNS}
             """,
             (run_id, client_id, problem, guidance, depth, formalize),
         ).fetchone()
@@ -49,6 +54,7 @@ def touch_run(
     revisions: int | None = None,
     decompositions: int | None = None,
     error: str | None = None,
+    current_tool: str | None = None,
 ) -> dict[str, Any] | None:
     fields: list[str] = ["updated_at = NOW()"]
     values: list[Any] = []
@@ -76,6 +82,9 @@ def touch_run(
     if error is not None:
         fields.append("error = %s")
         values.append(error)
+    if current_tool is not None:
+        fields.append("current_tool = %s")
+        values.append(current_tool)
     values.extend([run_id, client_id])
     with connection() as conn:
         row = conn.execute(
@@ -84,10 +93,7 @@ def touch_run(
             SET {", ".join(fields)}
             WHERE run_id = %s AND client_id = %s
             RETURNING
-                run_id, client_id, problem, guidance, depth, formalize,
-                status, phase, difficulty, passed,
-                proof_attempts, revisions, decompositions, error,
-                created_at, updated_at
+                {_RUN_COLUMNS}
             """,
             values,
         ).fetchone()
@@ -98,12 +104,9 @@ def touch_run(
 def get_run(run_id: str, client_id: str) -> dict[str, Any] | None:
     with connection() as conn:
         row = conn.execute(
-            """
+            f"""
             SELECT
-                run_id, client_id, problem, guidance, depth, formalize,
-                status, phase, difficulty, passed,
-                proof_attempts, revisions, decompositions, error,
-                created_at, updated_at
+                {_RUN_COLUMNS}
             FROM auto_prove_runs
             WHERE run_id = %s AND client_id = %s
             """,
@@ -115,12 +118,9 @@ def get_run(run_id: str, client_id: str) -> dict[str, Any] | None:
 def list_runs(client_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
     with connection() as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT
-                run_id, client_id, problem, guidance, depth, formalize,
-                status, phase, difficulty, passed,
-                proof_attempts, revisions, decompositions, error,
-                created_at, updated_at
+                {_RUN_COLUMNS}
             FROM auto_prove_runs
             WHERE client_id = %s
             ORDER BY updated_at DESC

@@ -52,6 +52,28 @@ _HEADING = re.compile(r"^## Classification:\s*(Easy|Medium|Hard)\s*$", re.IGNORE
 _CURRENT_RUN: contextvars.ContextVar[RunStore | None] = contextvars.ContextVar("auto_prove_run", default=None)
 _CANCEL_EVENTS: dict[str, asyncio.Event] = {}
 _ACTIVE_TASKS: dict[str, asyncio.Task[Any]] = {}
+_RUN_SUBSCRIBERS: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
+
+
+def subscribe_run_events(run_id: str) -> asyncio.Queue[dict[str, Any]]:
+    """Listen for live status/result events of an in-flight run."""
+    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    _RUN_SUBSCRIBERS.setdefault(run_id, set()).add(queue)
+    return queue
+
+
+def unsubscribe_run_events(run_id: str, queue: asyncio.Queue[dict[str, Any]]) -> None:
+    subscribers = _RUN_SUBSCRIBERS.get(run_id)
+    if not subscribers:
+        return
+    subscribers.discard(queue)
+    if not subscribers:
+        _RUN_SUBSCRIBERS.pop(run_id, None)
+
+
+async def publish_run_event(run_id: str, event: dict[str, Any]) -> None:
+    for queue in list(_RUN_SUBSCRIBERS.get(run_id, ())):
+        await queue.put(event)
 
 
 class AutoProveCancelled(Exception):
@@ -122,7 +144,7 @@ def mark_run_cancelled(run_id: str, store: RunStore | None = None, *, owner_id: 
     if owner_id:
         from .prove_runs import touch_run
 
-        touch_run(run_id, owner_id, status="cancelled", phase="cancelled", error="Cancelled by user")
+        touch_run(run_id, owner_id, status="cancelled", phase="cancelled", error="Cancelled by user", current_tool="")
     return {
         "ok": False,
         "error": "Cancelled by user",
@@ -261,9 +283,10 @@ def run_artifacts(run_id: str) -> dict[str, Any] | None:
     related_work = store.read("related_info/related_work.md").strip() or None
     if related_work == "(none)":
         related_work = None
-    if result is None and proof:
-        result = {"ok": True, "passed": None, "proof": proof}
-    elif isinstance(result, dict):
+    # In-progress drafts live on disk for the worker, but must not be shown as a
+    # finished proof. Only ``result.json`` (written at finalize/fail/cancel) is
+    # a client-visible result.
+    if isinstance(result, dict):
         result = {
             **result,
             "proof": proof or result.get("proof"),
@@ -602,20 +625,42 @@ async def run_auto_prove(
             formalize=formalize,
         )
 
-    async def status(phase: str, **details: Any) -> None:
-        _ensure_not_cancelled(run_id)
-        store.checkpoint(phase, state)
+    raw_emit = emit
+
+    async def tracked_emit(phase: str, details: dict[str, Any] | None = None) -> None:
+        payload = {"run_id": run_id, **(details or {})}
+        label = str(payload.get("label") or phase)
         if owner_id and run_id:
             from .prove_runs import touch_run
 
-            touch_run(run_id, owner_id, status="running", phase=str(details.get("label") or phase))
-        if emit:
-            await emit(phase, {"run_id": run_id, **details})
+            if phase == "tool":
+                touch_run(
+                    run_id,
+                    owner_id,
+                    status="running",
+                    phase=label,
+                    current_tool=str(payload.get("tool") or ""),
+                )
+            elif phase == "tool_complete":
+                touch_run(run_id, owner_id, current_tool="")
+            elif phase != "complete":
+                touch_run(run_id, owner_id, status="running", phase=label, current_tool="")
+        await publish_run_event(run_id, {"type": "status", "phase": phase, **payload})
+        if raw_emit:
+            await raw_emit(phase, payload)
+
+    async def status(phase: str, **details: Any) -> None:
+        _ensure_not_cancelled(run_id)
+        store.checkpoint(phase, state)
+        await tracked_emit(phase, details)
         store.log(details.get("label") or phase)
 
+    async def finish(result: dict[str, Any]) -> dict[str, Any]:
+        await publish_run_event(run_id, {"type": "result", **result})
+        return result
+
     # Emit run_id immediately so the UI can cancel before the first long model call.
-    if emit:
-        await emit("starting", {"run_id": run_id, "label": "Starting proof workflow"})
+    await tracked_emit("starting", {"label": "Starting proof workflow"})
 
     def write_status(label: str) -> None:
         store.write(
@@ -655,7 +700,7 @@ async def run_auto_prove(
             store.write("config.json", json.dumps({"depth": depth, "formalize": formalize, **limits}, indent=2))
             await status("surveying", label="Literature survey and difficulty check")
             write_status("surveying")
-            survey_text = await _ask(_with_skill("literature_survey.md"), {"problem": problem, "guidance": guidance}, tools=all_tools, max_rounds=6, emit=emit)
+            survey_text = await _ask(_with_skill("literature_survey.md"), {"problem": problem, "guidance": guidance}, tools=all_tools, max_rounds=6, emit=tracked_emit)
             difficulty = parse_difficulty(survey_text)
             related_work = extract_section(survey_text, "Related Work")
             easy_proof = extract_easy_proof(survey_text)
@@ -701,8 +746,9 @@ async def run_auto_prove(
                     proof_attempts=state.proof_attempts,
                     revisions=state.plan_revisions,
                     decompositions=state.decompositions,
+                    current_tool="",
                 )
-            return result
+            return await finish(result)
 
         next_action = "prove" if resuming and state.plan else "decompose"
         passed = False
@@ -734,7 +780,7 @@ async def run_auto_prove(
                     },
                     tools=all_tools,
                     max_rounds=4,
-                    emit=emit,
+                    emit=tracked_emit,
                 )
                 state.plan = extract_yaml(plan_text)
                 state.decompositions += 1
@@ -768,7 +814,7 @@ async def run_auto_prove(
                     },
                     tools=all_tools,
                     max_rounds=6,
-                    emit=emit,
+                    emit=tracked_emit,
                 )
                 state.proof_text = proof_text
                 state.proof_attempts += 1
@@ -786,7 +832,7 @@ async def run_auto_prove(
                         {"problem": problem, "plan": state.plan, "proof": state.proof_text},
                         tools=sage_tools,
                         max_rounds=3,
-                        emit=emit,
+                        emit=tracked_emit,
                     )
                 )
                 store.write(f"{proof_rel}/structural_verification.md", structural["report"])
@@ -799,7 +845,7 @@ async def run_auto_prove(
                     },
                     tools=None,
                     max_rounds=0,
-                    emit=emit,
+                    emit=tracked_emit,
                 )
                 store.write(f"{proof_rel}/structural_verdict.md", structural_verdict_text)
                 structural_passed = parse_verdict(structural_verdict_text)
@@ -826,7 +872,7 @@ async def run_auto_prove(
                             },
                             tools=sage_tools,
                             max_rounds=4,
-                            emit=emit,
+                            emit=tracked_emit,
                         )
                     )
                     store.write(f"{proof_rel}/detailed_verification.md", detailed["report"])
@@ -845,7 +891,7 @@ async def run_auto_prove(
                         },
                         tools=None,
                         max_rounds=0,
-                        emit=emit,
+                        emit=tracked_emit,
                     )
                 store.write(f"{proof_rel}/final_verdict.md", final_verdict_text)
 
@@ -884,7 +930,7 @@ async def run_auto_prove(
                     },
                     tools=None,
                     max_rounds=0,
-                    emit=emit,
+                    emit=tracked_emit,
                 )
                 store.write(f"{proof_rel}/regulator_decision.md", regulator_text)
                 decision = clamp_decision(parse_regulator_decision(regulator_text), state, limits)
@@ -948,7 +994,7 @@ async def run_auto_prove(
                 },
                 tools=None,
                 max_rounds=0,
-                emit=emit,
+                emit=tracked_emit,
             )
             store.write("failure_analysis.md", failure)
             if failure.strip():
@@ -981,7 +1027,7 @@ async def run_auto_prove(
             },
             tools=None,
             max_rounds=0,
-            emit=emit,
+            emit=tracked_emit,
         )
         store.write("proof_effort_summary.md", summary)
 
@@ -1010,13 +1056,22 @@ async def run_auto_prove(
                 revisions=state.plan_revisions,
                 decompositions=state.decompositions,
                 error=None if result.get("ok") else str(result.get("error") or "failed"),
+                current_tool="",
             )
-        return result
+        return await finish(result)
     except (AutoProveCancelled, asyncio.CancelledError):
-        return mark_run_cancelled(run_id, store, owner_id=owner_id)
+        return await finish(mark_run_cancelled(run_id, store, owner_id=owner_id))
     except Exception as exc:  # noqa: BLE001 - API failures must become a client result
         store.log(f"ERROR: {exc}")
         store.write("STATUS.md", f"# Auto Prove Status\n\nFailed: {exc}\n")
+        failed = {
+            "ok": False,
+            "error": f"Auto Prove failed: {exc}",
+            "run_id": run_id,
+            "run_dir": str(store.root),
+            "passed": False,
+        }
+        store.write("result.json", json.dumps(failed, ensure_ascii=False, indent=2))
         if owner_id and run_id:
             from .prove_runs import touch_run
 
@@ -1029,13 +1084,9 @@ async def run_auto_prove(
                 revisions=state.plan_revisions,
                 decompositions=state.decompositions,
                 error=str(exc),
+                current_tool="",
             )
-        return {
-            "ok": False,
-            "error": f"Auto Prove failed: {exc}",
-            "run_id": run_id,
-            "run_dir": str(store.root),
-        }
+        return await finish(failed)
     finally:
         _unregister_run(run_id)
         _CURRENT_RUN.reset(run_token)
