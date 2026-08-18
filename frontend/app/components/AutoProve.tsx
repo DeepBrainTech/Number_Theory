@@ -266,10 +266,10 @@ export default function AutoProve({
           <span className="chapterTag">AUTO PROVE</span>
           <h2>Proof search, with a referee loop</h2>
           <p className="leanSubtitle">
-            A structured QED workflow surveys relevant literature, decomposes the problem, develops candidate
-            proofs, and reviews them before revising the proof or strategy. Sage and research tools provide
-            evidence throughout. Every run is saved to your account; a conclusion is formally verified only
-            when the optional Lean check passes.
+            A QED workflow surveys literature, decomposes the problem, writes a proof, and reviews it
+            with citation checks against source URLs. Agents read and write the run directory, search
+            repeatedly, and may use Sage for computation. Every run is saved to your account; a
+            conclusion is formally verified only when the optional Lean check passes.
           </p>
         </div>
         <span className={`leanStatus ${modelConfigured ? "ok" : "bad"}`}>
@@ -284,7 +284,7 @@ export default function AutoProve({
         </div>
         <div className="autoProveReferences">
           <label htmlFor="auto-prove-guidance">Research guidance, conjectures, and links (optional)</label>
-          <p>Give the agents a direction, a counterexample lead, or paper URLs. Attach readable source files below; they are saved with this run.</p>
+          <p>Give the agents a direction, a counterexample lead, or paper URLs. Attach readable source files below; they are saved with this run. A <code>## Verification rules</code> section is treated as a hard requirement by the structural verifier.</p>
           <textarea
             disabled={running}
             id="auto-prove-guidance"

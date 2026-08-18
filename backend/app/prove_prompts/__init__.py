@@ -2,11 +2,31 @@
 
 from __future__ import annotations
 
-import re
 from functools import lru_cache
 from pathlib import Path
 
 _DIR = Path(__file__).resolve().parent
+
+_RUNTIME_NOTE = """
+
+---
+
+# Proof Lab service runtime
+
+You do not have a host shell. Use these tools instead of bash:
+
+- `list_run_files`, `read_run_file`, and `write_run_file` for this run directory. Paths in the prompt are relative to the run root.
+- `fetch_url` and `fetch_pdf_text` to open papers and verify citations against the source.
+- `web_search` plus the literature tools (arXiv, Crossref, Semantic Scholar, OEIS) for discovery. Search as many times as the task needs.
+- `sage_calculate` for named exact number-theory operations; `sage_execute` for other SageMath exploration. Print the values you need.
+
+Write every required output file with `write_run_file` before you finish. If you also return text, the file on disk is authoritative. Do not select or configure a model; the backend supplies one model for every role.
+"""
+
+
+class _FormatDict(dict[str, str]):
+    def __missing__(self, key: str) -> str:
+        return "{" + key + "}"
 
 
 @lru_cache(maxsize=None)
@@ -21,29 +41,17 @@ def skill_text() -> str:
 
 
 @lru_cache(maxsize=None)
-def qed_prompt(name: str) -> str:
-    """Load a verbatim proofQED/QED role prompt.
-
-    QED's original prompts address agents that exchange files.  This service
-    passes the equivalent artifacts in its JSON user message, so the brief
-    runtime note is deliberately appended rather than rewriting QED's text.
-    """
-    # Vendored files are flattened because only the prompt filename matters;
-    # callers retain QED's upstream directory names for readability.
+def _qed_original(name: str) -> str:
     path = _DIR / "qed" / name.rsplit("/", 1)[-1]
-    original = path.read_text(encoding="utf-8").strip()
-    rendered = re.sub(
-        r"\{([a-z_]+)\}",
-        lambda match: f"`{match.group(1)}` from the JSON user message",
-        original,
-    )
-    return rendered + (
-        "\n\n---\n\n"
-        "# Proof Lab service runtime\n\n"
-        "This service preserves the QED role instructions above verbatim, but "
-        "does not grant model filesystem access. Every referenced input file is "
-        "provided in the JSON user message as the correspondingly named content "
-        "(`problem`, `plan`, `proof`, verification reports, histories, and so on). "
-        "Return the requested artifact directly in your response instead of writing a file. "
-        "Do not select or configure a model; the backend supplies one model for every role."
-    )
+    return path.read_text(encoding="utf-8").strip()
+
+
+def qed_prompt(name: str, paths: dict[str, str] | None = None) -> str:
+    """Load a proofQED/QED role prompt and fill path placeholders.
+
+    QED's original prompts address agents that read and write files. This
+    service keeps those paths (relative to the run directory) and appends a
+    short note that tools replace bash.
+    """
+    rendered = _qed_original(name).format_map(_FormatDict({k: str(v) for k, v in (paths or {}).items()}))
+    return rendered + _RUNTIME_NOTE

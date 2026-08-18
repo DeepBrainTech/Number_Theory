@@ -65,6 +65,7 @@ class ParseHelpersTests(unittest.TestCase):
 
     def test_qed_verdict(self) -> None:
         self.assertTrue(parse_verdict("DONE"))
+        self.assertTrue(parse_verdict("DONE\n"))
         self.assertFalse(parse_verdict("CONTINUE"))
 
     def test_difficulty_heading(self) -> None:
@@ -109,6 +110,10 @@ class PromptLoadTests(unittest.TestCase):
     def test_verbatim_qed_prompts_are_available(self) -> None:
         self.assertIn("Verdict Task: Decomposition Proof Verification", qed_prompt("decomposition-prover/verdict_proof.md"))
         self.assertIn("Proof Effort Summary Task", qed_prompt("proof_effort_summary.md"))
+        filled = qed_prompt("literature_survey.md", {"problem_file": "problem.md", "related_info_dir": "related_info"})
+        self.assertIn("problem.md", filled)
+        self.assertIn("read_run_file", filled)
+        self.assertNotIn("{problem_file}", filled)
 
     def test_skill_and_role_prompts_load(self) -> None:
         self.assertIn("Cardinal Rule", skill_text())
@@ -135,6 +140,20 @@ class RunStoreTests(unittest.TestCase):
                 self.assertEqual(store.read("attempt_1/revision_1/proof_1/proof.md").strip(), "QED.")
                 store.log("hello")
                 self.assertIn("hello", (store.root / "log.txt").read_text(encoding="utf-8"))
+
+    def test_rejects_path_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("app.auto_prove.settings") as settings:
+                settings.auto_prove_runs_dir = Path(tmp)
+                _, store = RunStore.create("testrun")
+                with self.assertRaises(ValueError):
+                    store.resolve("../secret.txt")
+                blocked = store.write_safe("checkpoint.json", "nope")
+                self.assertFalse(blocked["ok"])
+                result = store.write_safe("proof.md", "QED.")
+                self.assertTrue(result["ok"])
+                listed = store.list_files()
+                self.assertIn("proof.md", listed)
 
     def test_in_progress_proof_is_not_a_finished_result(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

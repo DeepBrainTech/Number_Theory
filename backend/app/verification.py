@@ -40,6 +40,15 @@ async def call_sage(arguments: dict[str, Any]) -> dict[str, Any]:
         return response.json()
 
 
+async def call_sage_execute(code: str) -> dict[str, Any]:
+    timeout = min(max(settings.verifier_timeout, 90), 180)
+    async with httpx.AsyncClient(timeout=timeout + 5) as client:
+        response = await client.post(f"{settings.sage_url}/execute", json={"code": code})
+        if response.status_code >= 500:
+            response.raise_for_status()
+        return response.json()
+
+
 async def call_lean(arguments: dict[str, Any]) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=settings.verifier_timeout + 5) as client:
         response = await client.post(f"{settings.lean_url}/verify", json=arguments)

@@ -1,9 +1,9 @@
 """QED-inspired proof workflow on the Responses API.
 
 Roles follow proofQED/QED (survey → decompose → prove → structural → detailed →
-regulator) but stay inside this service: no Codex CLI, no arbitrary filesystem
-writes by the model. Sage and literature tools are the same function tools as
-chat. Artifacts are persisted by the server under AUTO_PROVE_RUNS_DIR.
+regulator). Agents work in the run directory via read/write tools, fetch public
+sources to check citations, and may run SageMath in the isolated sandbox.
+Artifacts are persisted under AUTO_PROVE_RUNS_DIR.
 """
 
 from __future__ import annotations
@@ -33,6 +33,16 @@ from .chat import (
 from .config import settings
 from .formalize import propose_statement, verify_statement
 from .prove_prompts import qed_prompt, skill_text
+from .prove_tools import (
+    FETCH_PDF_TOOL,
+    FETCH_URL_TOOL,
+    SAGE_EXECUTE_TOOL,
+    file_tools,
+    fetch_pdf_text,
+    fetch_url,
+    research_agent_tools,
+)
+from .verification import call_sage_execute
 
 
 EventEmitter = Callable[[str, dict[str, Any]], Awaitable[None]]
@@ -45,6 +55,29 @@ DEPTH_BUDGETS: dict[str, dict[str, int]] = {
     "quick": {"max_proof_attempts": 4, "max_revisions": 4, "max_decompositions": 4},
     "deep": {"max_proof_attempts": 4, "max_revisions": 4, "max_decompositions": 4},
 }
+
+# QED coding agents run until they finish writing files. These ceilings are high
+# enough for repeated search / citation fetches without matching host bash.
+SURVEY_ROUNDS = 48
+DECOMPOSE_ROUNDS = 32
+PROVE_ROUNDS = 48
+VERIFY_ROUNDS = 40
+LIGHT_ROUNDS = 8
+
+_MAX_RUN_FILE_CHARS = 400_000
+_READ_DEFAULT = 40_000
+_FORBIDDEN_WRITES = {"checkpoint.json", "call_log.jsonl", "result.json"}
+_AGENT_TOOLS = research_agent_tools([WEB_SEARCH_TOOL, *BASE_TOOLS], RESEARCH_TOOLS)
+_VERIFY_TOOLS = [
+    WEB_SEARCH_TOOL,
+    *BASE_TOOLS,
+    SAGE_EXECUTE_TOOL,
+    FETCH_URL_TOOL,
+    FETCH_PDF_TOOL,
+    *RESEARCH_TOOLS,
+    *file_tools(writable=True),
+]
+_READ_TOOLS = file_tools(writable=False)
 
 _JSON_BLOCK = re.compile(r"\{[^{}]*\"pass\"[^{}]*\}", re.DOTALL)
 _YAML_FENCE = re.compile(r"```(?:yaml|yml)\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
@@ -176,17 +209,82 @@ class RunStore:
         store = cls(settings.auto_prove_runs_dir / run_id)
         return run_id, store
 
+    def resolve(self, relative: str) -> Path:
+        """Resolve a run-relative path, rejecting traversal outside the run directory."""
+        text = (relative or "").replace("\\", "/").strip()
+        if not text or text.startswith("/") or ":" in Path(text).parts[0]:
+            raise ValueError("path must be a relative file inside this run")
+        candidate = Path(text)
+        if ".." in candidate.parts or candidate.is_absolute():
+            raise ValueError("path must not contain '..' or be absolute")
+        path = (self.root / candidate).resolve()
+        root = self.root.resolve()
+        if path != root and root not in path.parents:
+            raise ValueError("path escapes the run directory")
+        return path
+
     def write(self, relative: str, content: str) -> Path:
-        path = self.root / relative
+        path = self.resolve(relative) if relative not in {".", ""} else self.root
+        if path == self.root:
+            raise ValueError("path must be a file, not the run root")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content if content.endswith("\n") else content + "\n", encoding="utf-8")
         return path
 
     def read(self, relative: str) -> str:
-        path = self.root / relative
-        if not path.exists():
+        try:
+            path = self.resolve(relative)
+        except ValueError:
+            return ""
+        if not path.is_file():
             return ""
         return path.read_text(encoding="utf-8")
+
+    def list_files(self, prefix: str | None = None) -> list[str]:
+        root = self.root.resolve()
+        start = root
+        if prefix:
+            start = self.resolve(prefix)
+            if start.is_file():
+                return [start.relative_to(root).as_posix()]
+        files: list[str] = []
+        if not start.exists():
+            return files
+        for path in sorted(start.rglob("*") if start.is_dir() else []):
+            if path.is_file():
+                files.append(path.relative_to(root).as_posix())
+        return files
+
+    def read_slice(self, relative: str, offset: int | None, limit: int | None) -> dict[str, Any]:
+        path = self.resolve(relative)
+        if not path.is_file():
+            return {"ok": False, "path": relative, "error": "File not found"}
+        text = path.read_text(encoding="utf-8")
+        start = max(int(offset or 0), 0)
+        size = int(limit) if limit is not None else _READ_DEFAULT
+        size = max(1, min(size, _READ_DEFAULT * 2))
+        chunk = text[start : start + size]
+        return {
+            "ok": True,
+            "path": path.relative_to(self.root.resolve()).as_posix(),
+            "offset": start,
+            "length": len(chunk),
+            "total": len(text),
+            "truncated": start + len(chunk) < len(text),
+            "content": chunk,
+        }
+
+    def write_safe(self, relative: str, content: str) -> dict[str, Any]:
+        if Path(relative.replace("\\", "/")).name in _FORBIDDEN_WRITES:
+            return {"ok": False, "path": relative, "error": "This file is reserved for the server"}
+        if len(content) > _MAX_RUN_FILE_CHARS:
+            return {"ok": False, "path": relative, "error": f"File exceeds {_MAX_RUN_FILE_CHARS} characters"}
+        path = self.write(relative, content)
+        return {
+            "ok": True,
+            "path": path.relative_to(self.root.resolve()).as_posix(),
+            "bytes": path.stat().st_size,
+        }
 
     def log(self, message: str) -> None:
         line = f"[{_now()}] {message}\n"
@@ -208,6 +306,45 @@ class RunStore:
         }
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        self.write_token_usage()
+
+    def write_token_usage(self) -> None:
+        path = self.root / "call_log.jsonl"
+        if not path.exists():
+            return
+        rows: list[dict[str, Any]] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        input_total = sum(int(row.get("input_tokens") or 0) for row in rows)
+        output_total = sum(int(row.get("output_tokens") or 0) for row in rows)
+        lines = [
+            "# TOKEN_USAGE",
+            "",
+            f"- Calls: {len(rows)}",
+            f"- Input tokens: {input_total}",
+            f"- Output tokens: {output_total}",
+            f"- Total tokens: {input_total + output_total}",
+            "",
+        ]
+        for index, row in enumerate(rows, start=1):
+            lines.append(
+                f"{index}. `{row.get('role')}` · {row.get('elapsed_seconds')}s · "
+                f"in={row.get('input_tokens')} out={row.get('output_tokens')}"
+            )
+        self.write("TOKEN_USAGE.md", "\n".join(lines))
+        self.write(
+            "token_usage.json",
+            json.dumps(
+                {"calls": len(rows), "input_tokens": input_total, "output_tokens": output_total, "rows": rows},
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
 
     def human_guidance(self) -> str:
         return self.read("human_guidance.md")
@@ -308,8 +445,45 @@ def add_human_guidance(run_id: str, guidance: str) -> bool:
     if not store:
         return False
     store.append_human_guidance(guidance)
+    _append_human_help(store, guidance)
     store.log("Human guidance added")
     return True
+
+
+def _append_human_help(store: RunStore, guidance: str) -> None:
+    note = guidance.strip()
+    if not note:
+        return
+    existing = store.read("human_help/additional_prove_human_help_global.md")
+    store.write(
+        "human_help/additional_prove_human_help_global.md",
+        f"{existing}\n\n## {_now()}\n\n{note}".strip(),
+    )
+    rules = extract_section(note, "Verification rules") or extract_section(note, "Additional verification rules")
+    if not rules and re.match(r"(?i)^\s*(verify|verification rules)\s*[:\n]", note):
+        rules = note
+    if rules:
+        previous = store.read("human_help/additional_verify_rule_global.md")
+        store.write(
+            "human_help/additional_verify_rule_global.md",
+            f"{previous}\n\n## {_now()}\n\n{rules}".strip(),
+        )
+
+
+def _prefer_file(store: RunStore, relative: str, fallback: str) -> str:
+    existing = store.read(relative).strip()
+    if existing:
+        return existing
+    text = (fallback or "").strip()
+    if text:
+        store.write(relative, text)
+    return text
+
+
+def _seed_human_help(store: RunStore, guidance: str) -> None:
+    store.write("human_help/additional_prove_human_help_global.md", guidance.strip())
+    rules = extract_section(guidance, "Verification rules") or extract_section(guidance, "Additional verification rules")
+    store.write("human_help/additional_verify_rule_global.md", rules)
 
 
 @dataclass
@@ -364,7 +538,8 @@ def parse_regulator_decision(text: str) -> RegulatorDecision:
 
 def parse_verdict(text: str) -> bool:
     """QED verdict agents return DONE only for a passing verification."""
-    return text.strip().upper() == "DONE"
+    token = text.strip().split()[0].upper() if text.strip() else ""
+    return token == "DONE"
 
 
 def parse_difficulty(text: str) -> str:
@@ -456,22 +631,52 @@ def clamp_decision(
     return decision
 
 
-def _with_skill(prompt_name: str) -> str:
-    # Literature survey uses the service-adapted prompt so Easy short-circuit
-    # emits a parseable ``# Easy Proof`` section (filesystem writes are gone).
-    if prompt_name == "literature_survey.md":
-        from .prove_prompts import load_prompt
-
-        return skill_text() + "\n\n---\n\n" + load_prompt("literature_survey.md")
+def _with_skill(prompt_name: str, paths: dict[str, str] | None = None) -> str:
     names = {
+        "literature_survey.md": "literature_survey.md",
         "decomposition.md": "decomposition.md",
         "prover.md": "single_prover.md",
     }
-    return skill_text() + "\n\n---\n\n" + qed_prompt(
+    target = (
         "decomposition-prover/" + names[prompt_name]
         if prompt_name in {"decomposition.md", "prover.md"}
-        else names[prompt_name]
+        else names.get(prompt_name, prompt_name)
     )
+    body = qed_prompt(target, paths)
+    if prompt_name in {"literature_survey.md", "decomposition.md", "prover.md"}:
+        return skill_text() + "\n\n---\n\n" + body
+    return body
+
+
+async def execute_prove_tool(name: str, arguments: dict[str, Any], store: RunStore | None) -> dict[str, Any]:
+    try:
+        if name == "list_run_files":
+            if store is None:
+                return {"tool": name, "ok": False, "error": "No active run"}
+            prefix = arguments.get("prefix")
+            files = store.list_files(str(prefix) if prefix else None)
+            return {"tool": name, "ok": True, "files": files, "count": len(files)}
+        if name == "read_run_file":
+            if store is None:
+                return {"tool": name, "ok": False, "error": "No active run"}
+            return {"tool": name, **store.read_slice(str(arguments.get("path") or ""), arguments.get("offset"), arguments.get("limit"))}
+        if name == "write_run_file":
+            if store is None:
+                return {"tool": name, "ok": False, "error": "No active run"}
+            return {
+                "tool": name,
+                **store.write_safe(str(arguments.get("path") or ""), str(arguments.get("content") or "")),
+            }
+        if name == "fetch_url":
+            return {"tool": name, **await fetch_url(str(arguments.get("url") or ""))}
+        if name == "fetch_pdf_text":
+            return {"tool": name, **await fetch_pdf_text(str(arguments.get("url") or ""))}
+        if name == "sage_execute":
+            result = await call_sage_execute(str(arguments.get("code") or ""))
+            return {"tool": name, **result}
+        return await execute_tool(name, arguments)
+    except (ValueError, OSError) as exc:
+        return {"tool": name, "ok": False, "error": str(exc)}
 
 
 async def _ask(
@@ -487,7 +692,7 @@ async def _ask(
     if run and run.human_guidance():
         payload = {**payload, "human_guidance": run.human_guidance()}
     if run:
-        payload = {**payload, "prior_run_artifacts": run.artifact_context()}
+        payload = {**payload, "run_files": run.list_files()}
     started = datetime.now(timezone.utc)
     client = _client()
     input_items: list[dict[str, Any]] = [
@@ -507,11 +712,8 @@ async def _ask(
         calls = [item for item in (response.output or []) if getattr(item, "type", None) == "function_call"]
         if not calls:
             if has_hosted_web_search_call(response):
-                # Preserve DeepSeek hosted web search for current information,
-                # then remove it for this step's remaining turns. This prevents
-                # repeated server-search payloads from bloating stateless context.
+                # Keep web_search available so later turns can search again.
                 input_items.extend(response_output_as_input(response))
-                active_tools = [tool for tool in active_tools if tool.get("type") != "web_search"]
                 follow = {
                     "model": settings.deepseek_model,
                     "instructions": instructions,
@@ -531,7 +733,7 @@ async def _ask(
                 arguments = {}
             if emit:
                 await emit("tool", {"label": f"Tool: {call.name}", "tool": call.name})
-            result = await execute_tool(call.name, arguments)
+            result = await execute_prove_tool(call.name, arguments, run)
             if emit:
                 await emit("tool_complete", {"tool": call.name})
             outputs.append(
@@ -543,7 +745,7 @@ async def _ask(
             )
         input_items.extend(response_output_as_input(response))
         input_items.extend(outputs)
-        follow: dict[str, Any] = {
+        follow = {
             "model": settings.deepseek_model,
             "instructions": instructions,
             "input": input_items,
@@ -553,13 +755,12 @@ async def _ask(
         response = await client.responses.create(**follow)
     text = (response.output_text or "").strip()
     if not text:
-        # DeepSeek documents occasional empty outputs. Retry once with an
-        # explicit final-answer instruction instead of failing an entire run.
         retry = await client.responses.create(
             model=settings.deepseek_model,
             instructions=(
                 f"{instructions}\n\nReturn a non-empty final textual answer now. "
-                "Do not make further tool calls."
+                "Do not make further tool calls. If an output file was required, "
+                "summarize what you wrote."
             ),
             input=input_items,
             tool_choice="none",
@@ -568,7 +769,7 @@ async def _ask(
         if not text:
             raise RuntimeError("DeepSeek returned an empty response after one retry.")
     if run:
-        role = str(payload.get("mode") or payload.get("verification_phase") or "agent")
+        role = str(payload.get("mode") or payload.get("verification_phase") or payload.get("role") or "agent")
         run.record_call(role, started.strftime("%Y-%m-%dT%H:%M:%SZ"), (datetime.now(timezone.utc) - started).total_seconds(), response)
     return text
 
@@ -608,10 +809,9 @@ async def run_auto_prove(
     assert run_id is not None
     run_token = _CURRENT_RUN.set(store)
     _register_run(run_id)
-    # Web search adds timely sources; scholarly APIs provide structured papers.
-    # `_ask` limits hosted web search to one call per model step.
-    all_tools = [WEB_SEARCH_TOOL, *BASE_TOOLS, *RESEARCH_TOOLS]
-    sage_tools = list(BASE_TOOLS)
+    # Search, literature, Sage, citation fetch, and run-directory file tools.
+    all_tools = _AGENT_TOOLS
+    sage_tools = _VERIFY_TOOLS
 
     if owner_id and run_id:
         from .prove_runs import create_run
@@ -682,14 +882,17 @@ async def run_auto_prove(
         if resuming:
             await status("resuming", label="Resuming research run from its last stable checkpoint")
             survey_text = store.read("related_info/survey_raw.md")
-            difficulty = parse_difficulty(survey_text)
+            difficulty = parse_difficulty(store.read("related_info/difficulty_evaluation.md") or survey_text)
             related_work = store.read("related_info/related_work.md")
             state.related_work = related_work
-            easy_proof = ""
+            easy_proof = store.read("proof.md") if difficulty == "easy" else ""
         else:
             store.write("problem.md", problem)
             if guidance.strip():
                 store.write("guidance.md", guidance)
+            _seed_human_help(store, guidance)
+            store.write("error.log", "")
+            store.write("plan_history.md", "# Plan History\n")
             for index, reference in enumerate(references or [], start=1):
                 name = str(reference.get("name") or f"reference-{index}")
                 content = str(reference.get("content") or "").strip()
@@ -700,14 +903,38 @@ async def run_auto_prove(
             store.write("config.json", json.dumps({"depth": depth, "formalize": formalize, **limits}, indent=2))
             await status("surveying", label="Literature survey and difficulty check")
             write_status("surveying")
-            survey_text = await _ask(_with_skill("literature_survey.md"), {"problem": problem, "guidance": guidance}, tools=all_tools, max_rounds=6, emit=tracked_emit)
-            difficulty = parse_difficulty(survey_text)
-            related_work = extract_section(survey_text, "Related Work")
-            easy_proof = extract_easy_proof(survey_text)
-            evaluation = extract_section(survey_text, "Difficulty Evaluation") or survey_text
-            store.write("related_info/difficulty_evaluation.md", evaluation or survey_text)
-            store.write("related_info/related_work.md", related_work or "(none)")
+            survey_paths = {
+                "problem_file": "problem.md",
+                "related_info_dir": "related_info",
+                "proof_file": "proof.md",
+                "error_file": "error.log",
+                "output_dir": ".",
+            }
+            survey_text = await _ask(
+                _with_skill("literature_survey.md", survey_paths),
+                {
+                    "role": "literature_survey",
+                    "read_these_files_first": ["problem.md", "guidance.md", "human_help/additional_prove_human_help_global.md"],
+                },
+                tools=all_tools,
+                max_rounds=SURVEY_ROUNDS,
+                emit=tracked_emit,
+            )
             store.write("related_info/survey_raw.md", survey_text)
+            evaluation = store.read("related_info/difficulty_evaluation.md").strip()
+            if not evaluation:
+                evaluation = extract_section(survey_text, "Difficulty Evaluation") or survey_text
+                store.write("related_info/difficulty_evaluation.md", evaluation)
+            difficulty = parse_difficulty(evaluation)
+            related_work = store.read("related_info/related_work.md").strip()
+            if not related_work:
+                related_work = extract_section(survey_text, "Related Work")
+                store.write("related_info/related_work.md", related_work or "(none)")
+            if related_work == "(none)":
+                related_work = ""
+            easy_proof = store.read("proof.md").strip() or extract_easy_proof(survey_text)
+            if easy_proof and difficulty == "easy" and not store.read("proof.md").strip():
+                store.write("proof.md", easy_proof)
             state.related_work = related_work
             store.log(f"Difficulty classified as {difficulty}")
             if owner_id and run_id:
@@ -754,6 +981,8 @@ async def run_auto_prove(
         passed = False
 
         while state.attempt <= limits["max_decompositions"]:
+            revision_dir = f"attempt_{state.attempt}/revision_{state.revision}"
+            plan_path = f"{revision_dir}/decomposition.yaml"
             if next_action in {"decompose", "decompose_revise"}:
                 mode = "CREATE" if next_action == "decompose" and state.attempt == 1 and state.revision == 1 else (
                     "REVISE" if next_action == "decompose_revise" else "REWRITE"
@@ -763,31 +992,49 @@ async def run_auto_prove(
                     label=f"Decomposition {mode} (attempt {state.attempt}, revision {state.revision})",
                 )
                 write_status("planning")
+                prev_rev = state.revision - 1
+                prev_decomp = f"attempt_{state.attempt}/revision_{prev_rev}/decomposition.yaml" if mode == "REVISE" else ""
+                prev_proof_file = ""
+                if mode == "REVISE" and state.previous_proof:
+                    prev_proof_file = f"attempt_{state.attempt}/revision_{prev_rev}/proof_{max(state.proof, 1)}/proof.md"
+                    if not store.read(prev_proof_file).strip():
+                        store.write("previous_proof.md", state.previous_proof)
+                        prev_proof_file = "previous_proof.md"
+                decomp_paths = {
+                    "mode": mode,
+                    "problem_file": "problem.md",
+                    "related_work_file": "related_info/related_work.md",
+                    "problem_id": run_id,
+                    "attempt_number": str(state.attempt),
+                    "revision_number": str(state.revision),
+                    "timestamp": _now(),
+                    "output_file": plan_path,
+                    "current_decomposition_file": prev_decomp,
+                    "verification_feedback": state.verification_feedback if mode == "REVISE" else "",
+                    "regulator_guidance": state.regulator_guidance if mode in {"REVISE", "REWRITE"} else "",
+                    "previous_proof_file": prev_proof_file,
+                    "human_help_file": "human_help/additional_prove_human_help_global.md",
+                    "plan_history_file": "plan_history.md",
+                }
                 plan_text = await _ask(
-                    _with_skill("decomposition.md"),
+                    _with_skill("decomposition.md", decomp_paths),
                     {
+                        "role": "decomposer",
                         "mode": mode,
-                        "problem": problem,
-                        "guidance": guidance,
-                        "related_work": state.related_work,
-                        "current_plan": state.plan,
-                        "previous_proof": state.previous_proof,
-                        "verification_feedback": state.verification_feedback,
-                        "regulator_guidance": state.regulator_guidance,
-                        "plan_history": state.plan_history,
-                        "attempt": state.attempt,
-                        "revision": state.revision,
+                        "read_these_files_first": [
+                            "problem.md",
+                            "related_info/related_work.md",
+                            "plan_history.md",
+                            "human_help/additional_prove_human_help_global.md",
+                        ],
                     },
                     tools=all_tools,
-                    max_rounds=4,
+                    max_rounds=DECOMPOSE_ROUNDS,
                     emit=tracked_emit,
                 )
-                state.plan = extract_yaml(plan_text)
+                store.write(f"{revision_dir}/decomposer_response.md", plan_text)
+                state.plan = _prefer_file(store, plan_path, extract_yaml(plan_text))
                 state.decompositions += 1
-                store.write(
-                    f"attempt_{state.attempt}/revision_{state.revision}/decomposition.yaml",
-                    state.plan,
-                )
                 store.write("plan.yaml", state.plan)
                 state.regulator_guidance = ""
 
@@ -801,53 +1048,99 @@ async def run_auto_prove(
                 )
                 write_status("proving")
                 proof_rel = store.proof_dir(state.attempt, state.revision, state.proof)
+                proof_path = f"{proof_rel}/proof.md"
+                prev_proof_path = ""
+                prev_verify_path = ""
+                if state.previous_proof:
+                    store.write(f"{proof_rel}/previous_proof.md", state.previous_proof)
+                    prev_proof_path = f"{proof_rel}/previous_proof.md"
+                if state.verification_feedback:
+                    store.write(f"{proof_rel}/previous_verification.md", state.verification_feedback)
+                    prev_verify_path = f"{proof_rel}/previous_verification.md"
+                prover_paths = {
+                    "problem_file": "problem.md",
+                    "related_work_file": "related_info/related_work.md",
+                    "decomposition_file": plan_path if store.read(plan_path).strip() else "plan.yaml",
+                    "human_help_file": "human_help/additional_prove_human_help_global.md",
+                    "previous_proof_file": prev_proof_path,
+                    "previous_verification_file": prev_verify_path,
+                    "output_file": proof_path,
+                    "output_dir": ".",
+                    "scratchpad_file": f"{proof_rel}/scratchpad.md",
+                }
                 proof_text = await _ask(
-                    _with_skill("prover.md"),
+                    _with_skill("prover.md", prover_paths),
                     {
-                        "problem": problem,
-                        "guidance": guidance,
-                        "plan": state.plan,
-                        "related_work": state.related_work,
-                        "previous_proof": state.previous_proof,
-                        "verification_feedback": state.verification_feedback,
-                        "regulator_guidance": state.regulator_guidance,
+                        "role": "single_prover",
+                        "read_these_files_first": [
+                            "problem.md",
+                            prover_paths["decomposition_file"],
+                            "related_info/related_work.md",
+                        ],
                     },
                     tools=all_tools,
-                    max_rounds=6,
+                    max_rounds=PROVE_ROUNDS,
                     emit=tracked_emit,
                 )
-                state.proof_text = proof_text
+                store.write(f"{proof_rel}/prover_response.md", proof_text)
+                state.proof_text = _prefer_file(store, proof_path, proof_text)
                 state.proof_attempts += 1
-                store.write(f"{proof_rel}/proof.md", proof_text)
-                store.write("proof.md", proof_text)
+                store.write("proof.md", state.proof_text)
 
                 await status(
                     "reviewing",
                     label=f"Structural review {state.proof} (attempt {state.attempt})",
                 )
                 write_status("reviewing")
-                structural = _parse_review(
-                    await _ask(
-                        qed_prompt("decomposition-prover/proof_verify_structural.md"),
-                        {"problem": problem, "plan": state.plan, "proof": state.proof_text},
-                        tools=sage_tools,
-                        max_rounds=3,
-                        emit=tracked_emit,
-                    )
-                )
-                store.write(f"{proof_rel}/structural_verification.md", structural["report"])
-                structural_verdict_text = await _ask(
-                    qed_prompt("decomposition-prover/verdict_proof.md"),
+                structural_path = f"{proof_rel}/structural_verification.md"
+                structural_report = await _ask(
+                    qed_prompt(
+                        "decomposition-prover/proof_verify_structural.md",
+                        {
+                            "problem_file": "problem.md",
+                            "proof_file": "proof.md",
+                            "decomposition_file": prover_paths["decomposition_file"],
+                            "additional_verify_rule_global_file": "human_help/additional_verify_rule_global.md",
+                            "output_file": structural_path,
+                            "error_file": f"{proof_rel}/error_structural_verification.md",
+                            "output_dir": ".",
+                        },
+                    ),
                     {
-                        "mode": "STRUCTURAL",
-                        "structural_verification": structural["report"],
-                        "structural_verification_file": "structural_verification (JSON field)",
+                        "role": "structural_verifier",
+                        "read_these_files_first": [
+                            "problem.md",
+                            "proof.md",
+                            prover_paths["decomposition_file"],
+                            "human_help/additional_verify_rule_global.md",
+                        ],
                     },
-                    tools=None,
-                    max_rounds=0,
+                    tools=sage_tools,
+                    max_rounds=VERIFY_ROUNDS,
                     emit=tracked_emit,
                 )
-                store.write(f"{proof_rel}/structural_verdict.md", structural_verdict_text)
+                structural_report = _prefer_file(store, structural_path, structural_report)
+                structural = _parse_review(structural_report)
+                structural_verdict_path = f"{proof_rel}/structural_verdict.md"
+                structural_verdict_text = await _ask(
+                    qed_prompt(
+                        "decomposition-prover/verdict_proof.md",
+                        {
+                            "mode": "STRUCTURAL",
+                            "structural_verification_file": structural_path,
+                            "detailed_verification_file": "",
+                        },
+                    ),
+                    {
+                        "role": "verdict",
+                        "mode": "STRUCTURAL",
+                        "read_these_files_first": [structural_path],
+                    },
+                    tools=_READ_TOOLS,
+                    max_rounds=LIGHT_ROUNDS,
+                    emit=tracked_emit,
+                )
+                structural_verdict_text = _prefer_file(store, structural_verdict_path, structural_verdict_text)
                 structural_passed = parse_verdict(structural_verdict_text)
                 detailed = {
                     "pass": True,
@@ -856,44 +1149,59 @@ async def run_auto_prove(
                     "report": "Skipped: structural review failed.",
                 }
                 phase: Literal["structural", "detailed"] = "structural"
+                detailed_path = f"{proof_rel}/detailed_verification.md"
                 if structural_passed:
                     await status(
                         "reviewing",
                         label=f"Detailed review {state.proof} (attempt {state.attempt})",
                     )
-                    detailed = _parse_review(
-                        await _ask(
-                            qed_prompt("decomposition-prover/proof_verify_detailed.md"),
+                    detailed_report = await _ask(
+                        qed_prompt(
+                            "decomposition-prover/proof_verify_detailed.md",
                             {
-                                "problem": problem,
-                                "plan": state.plan,
-                                "proof": state.proof_text,
-                                "structural_review": structural["report"],
+                                "problem_file": "problem.md",
+                                "proof_file": "proof.md",
+                                "structural_report_file": structural_path,
+                                "decomposition_file": prover_paths["decomposition_file"],
+                                "output_file": detailed_path,
+                                "error_file": f"{proof_rel}/error_detailed_verification.md",
+                                "output_dir": ".",
                             },
-                            tools=sage_tools,
-                            max_rounds=4,
-                            emit=tracked_emit,
-                        )
+                        ),
+                        {
+                            "role": "detailed_verifier",
+                            "read_these_files_first": ["problem.md", "proof.md", structural_path],
+                        },
+                        tools=sage_tools,
+                        max_rounds=VERIFY_ROUNDS,
+                        emit=tracked_emit,
                     )
-                    store.write(f"{proof_rel}/detailed_verification.md", detailed["report"])
+                    detailed_report = _prefer_file(store, detailed_path, detailed_report)
+                    detailed = _parse_review(detailed_report)
                     phase = "detailed"
 
                 final_verdict_text = "CONTINUE"
                 if structural_passed:
                     final_verdict_text = await _ask(
-                        qed_prompt("decomposition-prover/verdict_proof.md"),
+                        qed_prompt(
+                            "decomposition-prover/verdict_proof.md",
+                            {
+                                "mode": "FINAL",
+                                "structural_verification_file": structural_path,
+                                "detailed_verification_file": detailed_path,
+                            },
+                        ),
                         {
+                            "role": "verdict",
                             "mode": "FINAL",
-                            "structural_verification": structural["report"],
-                            "detailed_verification": detailed["report"],
-                            "structural_verification_file": "structural_verification (JSON field)",
-                            "detailed_verification_file": "detailed_verification (JSON field)",
+                            "read_these_files_first": [structural_path, detailed_path],
                         },
-                        tools=None,
-                        max_rounds=0,
+                        tools=_READ_TOOLS,
+                        max_rounds=LIGHT_ROUNDS,
                         emit=tracked_emit,
                     )
                 store.write(f"{proof_rel}/final_verdict.md", final_verdict_text)
+                final_verdict_text = store.read(f"{proof_rel}/final_verdict.md").strip() or final_verdict_text
 
                 state.review_issues = structural["issues"] + detailed["issues"]
                 state.verification_feedback = (
@@ -909,40 +1217,60 @@ async def run_auto_prove(
 
                 await status("regulating", label=f"Regulator deciding after {phase} failure")
                 write_status("regulating")
+                regulator_path = f"{proof_rel}/regulator_decision.md"
+                attempt_history = (
+                    f"proofs={state.proof_attempts}, plan_revisions={state.plan_revisions}, "
+                    f"decompositions={state.decompositions}"
+                )
                 regulator_text = await _ask(
-                    qed_prompt("decomposition-prover/regulator.md"),
+                    qed_prompt(
+                        "decomposition-prover/regulator.md",
+                        {
+                            "mode": "DECIDE",
+                            "verification_phase": phase,
+                            "state_file": (
+                                f"attempt={state.attempt}/{limits['max_decompositions']}, "
+                                f"revision={state.revision}/{limits['max_revisions']}, "
+                                f"proof={state.proof}/{limits['max_proof_attempts']}"
+                            ),
+                            "decomposition_file": prover_paths["decomposition_file"],
+                            "proof_file": "proof.md",
+                            "verification_report": f"{proof_rel}/verification.md",
+                            "attempt_history": attempt_history,
+                            "max_proof_attempts": str(limits["max_proof_attempts"]),
+                            "max_revisions": str(limits["max_revisions"]),
+                            "max_decompositions": str(limits["max_decompositions"]),
+                            "output_file": regulator_path,
+                            "plan_history_file": "plan_history.md",
+                        },
+                    ),
                     {
+                        "role": "regulator",
                         "mode": "DECIDE",
                         "verification_phase": phase,
-                        "problem": problem,
-                        "plan": state.plan,
-                        "proof": state.proof_text,
-                        "verification_report": state.verification_feedback,
-                        "attempt_history": (
-                            f"proofs={state.proof_attempts}, plan_revisions={state.plan_revisions}, "
-                            f"decompositions={state.decompositions}"
-                        ),
-                        "plan_history": state.plan_history,
-                        "attempt": state.attempt,
-                        "revision": state.revision,
-                        "proof_index": state.proof,
-                        **limits,
+                        "read_these_files_first": [
+                            "proof.md",
+                            f"{proof_rel}/verification.md",
+                            "plan_history.md",
+                        ],
                     },
-                    tools=None,
-                    max_rounds=0,
+                    tools=[*file_tools(writable=True)],
+                    max_rounds=LIGHT_ROUNDS,
                     emit=tracked_emit,
                 )
-                store.write(f"{proof_rel}/regulator_decision.md", regulator_text)
+                regulator_text = _prefer_file(store, regulator_path, regulator_text)
                 decision = clamp_decision(parse_regulator_decision(regulator_text), state, limits)
                 store.log(f"Regulator: {decision}")
                 state.previous_proof = state.proof_text
                 state.regulator_guidance = regulator_text
                 if decision in {"REVISE_PLAN", "REWRITE"}:
                     entry = extract_section(regulator_text, "Plan History Entry") or regulator_text
-                    state.plan_history += (
-                        f"\n\n## Attempt {state.attempt} · Revision {state.revision} — {decision}\n\n{entry}\n"
-                    )
-                    store.write("plan_history.md", state.plan_history)
+                    state.plan_history = store.read("plan_history.md")
+                    if f"Attempt {state.attempt} · Revision {state.revision} — {decision}" not in state.plan_history:
+                        state.plan_history += (
+                            f"\n\n## Attempt {state.attempt} · Revision {state.revision} — {decision}\n\n{entry}\n"
+                        )
+                        store.write("plan_history.md", state.plan_history)
 
                 if decision == "REVISE_PROOF":
                     state.proof += 1
@@ -973,30 +1301,40 @@ async def run_auto_prove(
 
         if not passed:
             await status("regulating", label="Retry limits exhausted — failure analysis")
+            failure_paths = {
+                "mode": "FINAL",
+                "verification_phase": "final",
+                "state_file": (
+                    f"attempt={state.attempt}/{limits['max_decompositions']}, "
+                    f"revision={state.revision}/{limits['max_revisions']}, "
+                    f"proof={state.proof}/{limits['max_proof_attempts']}"
+                ),
+                "decomposition_file": "plan.yaml",
+                "proof_file": "proof.md",
+                "verification_report": "verification.md" if store.read("verification.md") else "plan_history.md",
+                "attempt_history": (
+                    f"proofs={state.proof_attempts}, plan_revisions={state.plan_revisions}, "
+                    f"decompositions={state.decompositions}"
+                ),
+                "max_proof_attempts": str(limits["max_proof_attempts"]),
+                "max_revisions": str(limits["max_revisions"]),
+                "max_decompositions": str(limits["max_decompositions"]),
+                "output_file": "failure_analysis.md",
+                "plan_history_file": "plan_history.md",
+            }
             failure = await _ask(
-                qed_prompt("decomposition-prover/regulator.md"),
+                qed_prompt("decomposition-prover/regulator.md", failure_paths),
                 {
+                    "role": "regulator",
                     "mode": "FINAL",
                     "verification_phase": "final",
-                    "problem": problem,
-                    "plan": state.plan,
-                    "proof": state.proof_text,
-                    "verification_report": state.verification_feedback,
-                    "attempt_history": (
-                        f"proofs={state.proof_attempts}, plan_revisions={state.plan_revisions}, "
-                        f"decompositions={state.decompositions}"
-                    ),
-                    "plan_history": state.plan_history,
-                    "attempt": state.attempt,
-                    "revision": state.revision,
-                    "proof_index": state.proof,
-                    **limits,
+                    "read_these_files_first": ["proof.md", "plan.yaml", "plan_history.md"],
                 },
-                tools=None,
-                max_rounds=0,
+                tools=[*file_tools(writable=True)],
+                max_rounds=LIGHT_ROUNDS,
                 emit=tracked_emit,
             )
-            store.write("failure_analysis.md", failure)
+            failure = _prefer_file(store, "failure_analysis.md", failure)
             if failure.strip():
                 state.review_issues = list(dict.fromkeys([*state.review_issues, "Retry limits exhausted."]))
 
@@ -1006,29 +1344,28 @@ async def run_auto_prove(
         await status("summarizing", label="QED proof-effort summary")
         write_status("summarizing")
         summary = await _ask(
-            qed_prompt("proof_effort_summary.md"),
-            {
-                "problem": problem,
-                "difficulty": difficulty,
-                "passed": passed,
-                "final_proof": state.proof_text,
-                "related_work": state.related_work,
-                "plan_history": state.plan_history,
-                "verification_feedback": state.verification_feedback,
-                "failure_analysis": store.read("failure_analysis.md"),
-                "resource_usage": {
-                    "proof_attempts": state.proof_attempts,
-                    "plan_revisions": state.plan_revisions,
-                    "decompositions": state.decompositions,
-                    "limits": limits,
+            qed_prompt(
+                "proof_effort_summary.md",
+                {
+                    "summary_file": "proof_effort_summary.md",
+                    "output_dir": ".",
                 },
-                "summary_file": "proof_effort_summary.md",
-                "output_dir": "the current run artifacts supplied in this JSON message",
+            ),
+            {
+                "role": "proof_summary",
+                "read_these_files_first": [
+                    "problem.md",
+                    "proof.md",
+                    "TOKEN_USAGE.md",
+                    "related_info/difficulty_evaluation.md",
+                    "plan_history.md",
+                ],
             },
-            tools=None,
-            max_rounds=0,
+            tools=[*file_tools(writable=True)],
+            max_rounds=LIGHT_ROUNDS,
             emit=tracked_emit,
         )
+        summary = _prefer_file(store, "proof_effort_summary.md", summary)
         store.write("proof_effort_summary.md", summary)
 
         result = await _finalize(

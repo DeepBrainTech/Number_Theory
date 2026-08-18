@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import tempfile
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
@@ -27,6 +30,10 @@ from sage.env import SAGE_VERSION
 
 
 MAX_BODY = 64 * 1024
+MAX_EXECUTE_BODY = 32 * 1024
+MAX_EXECUTE_CODE = 24 * 1024
+MAX_EXECUTE_OUTPUT = 24 * 1024
+EXECUTE_TIMEOUT = 90
 MAX_DIGITS = 300
 # Tighter bounds for operations whose cost explodes with input size.
 MAX_CLASS_NUMBER_D = 10**12
@@ -182,6 +189,52 @@ def calculate(data: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "engine": f"SageMath {SAGE_VERSION}", "result": result}
 
 
+def execute(code: str) -> dict[str, Any]:
+    """Run SageMath in a subprocess so a hung computation cannot stall health checks forever."""
+    text = str(code or "").strip()
+    if not text:
+        raise ValueError("code is required")
+    if len(text) > MAX_EXECUTE_CODE:
+        raise ValueError(f"code must be at most {MAX_EXECUTE_CODE} characters")
+    script = "from sage.all import *\n" + text
+    handle = tempfile.NamedTemporaryFile("w", suffix=".sage", dir="/tmp", delete=False, encoding="utf-8")
+    try:
+        handle.write(script)
+        handle.close()
+        completed = subprocess.run(
+            ["sage", handle.name],
+            capture_output=True,
+            text=True,
+            timeout=EXECUTE_TIMEOUT,
+            cwd="/tmp",
+            env={**os.environ, "HOME": "/tmp", "DOT_SAGE": os.environ.get("DOT_SAGE", "/tmp/.sage")},
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": f"Sage execute exceeded {EXECUTE_TIMEOUT}s"}
+    finally:
+        try:
+            os.unlink(handle.name)
+        except OSError:
+            pass
+    output = completed.stdout or ""
+    if completed.stderr:
+        output = f"{output}\n{completed.stderr}" if output else completed.stderr
+    truncated = len(output) > MAX_EXECUTE_OUTPUT
+    output = output[:MAX_EXECUTE_OUTPUT]
+    if completed.returncode != 0:
+        return {
+            "ok": False,
+            "error": output.strip() or f"sage exited {completed.returncode}",
+            "truncated": truncated,
+        }
+    return {
+        "ok": True,
+        "engine": f"SageMath {SAGE_VERSION}",
+        "output": output.strip() or "(no stdout; print() the values you need)",
+        "truncated": truncated,
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     def send_json(self, status: int, data: dict[str, Any]) -> None:
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
@@ -198,15 +251,19 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(404, {"ok": False, "error": "not found"})
 
     def do_POST(self) -> None:
-        if self.path != "/calculate":
+        if self.path not in {"/calculate", "/execute"}:
             self.send_json(404, {"ok": False, "error": "not found"})
             return
         try:
             length = int(self.headers.get("Content-Length", "0"))
-            if length <= 0 or length > MAX_BODY:
+            limit = MAX_EXECUTE_BODY if self.path == "/execute" else MAX_BODY
+            if length <= 0 or length > limit:
                 raise ValueError("请求体大小不合法")
             data = json.loads(self.rfile.read(length))
-            self.send_json(200, calculate(data))
+            if self.path == "/execute":
+                self.send_json(200, execute(str(data.get("code") or "")))
+            else:
+                self.send_json(200, calculate(data))
         except (ValueError, TypeError, ArithmeticError) as exc:
             self.send_json(400, {"ok": False, "error": str(exc)})
         except Exception as exc:  # noqa: BLE001 - the sandbox must always answer
