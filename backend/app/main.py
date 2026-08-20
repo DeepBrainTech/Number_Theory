@@ -36,7 +36,9 @@ from .lean_workspace import create_run as create_lean_run, get_run as get_lean_r
 from .auto_prove import (
     add_human_guidance,
     delete_run_artifacts,
+    is_run_active,
     mark_run_cancelled,
+    mark_run_interrupted,
     request_cancel,
     run_artifacts,
     run_auto_prove,
@@ -839,6 +841,11 @@ async def auto_prove_run_events_api(
         if latest is None:
             yield _sse_data({"type": "result", "ok": False, "error": "Auto Prove run not found", "run_id": run_id})
             return
+        # Backend restart / crash leaves DB status=running with no worker. Reconcile
+        # so the UI unlocks Cancel/Resume instead of waiting forever.
+        if latest["status"] == "running" and not is_run_active(run_id):
+            mark_run_interrupted(run_id, owner_id=owner_id)
+            latest = get_run(run_id, owner_id) or latest
         snapshot = {
             "type": "snapshot",
             "run_id": run_id,
@@ -863,6 +870,9 @@ async def auto_prove_run_events_api(
                 except asyncio.TimeoutError:
                     yield ": keepalive\n\n"
                     current = get_run(run_id, owner_id)
+                    if current is not None and current["status"] == "running" and not is_run_active(run_id):
+                        mark_run_interrupted(run_id, owner_id=owner_id)
+                        current = get_run(run_id, owner_id) or current
                     if current is None or current["status"] != "running":
                         if current is not None:
                             yield _sse_data({

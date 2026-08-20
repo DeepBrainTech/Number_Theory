@@ -757,9 +757,10 @@ textarea {
 .autoProveResearch { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; margin-top: 18px; padding: 16px 20px; }
 .autoProveResearch p { color: var(--muted); font-size: 13px; margin: 8px 0; }
 .autoProveResearch textarea { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; color: var(--ink); display: block; font: inherit; margin: 10px 0; min-height: 70px; padding: 9px; resize: vertical; width: 100%; }
-.autoProveResearch button { background: var(--green); border: 0; border-radius: 8px; color: white; cursor: pointer; font-weight: 700; padding: 8px 12px; }
-.autoProveResearch button:disabled { cursor: not-allowed; opacity: .45; }
-.autoProveResearch button.secondary { background: transparent; border: 1px solid var(--green); color: var(--green); margin-left: 8px; }
+.autoProveResearchActions { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; }
+.autoProveResearchActions button { background: var(--green); border: 0; border-radius: 8px; color: white; cursor: pointer; font-weight: 700; padding: 8px 12px; }
+.autoProveResearchActions button:disabled { cursor: not-allowed; opacity: .45; }
+.autoProveResearchActions button.secondary { background: transparent; border: 1px solid var(--green); color: var(--green); margin-left: 0; }
 .autoProveResult, .autoProveReview, .autoProvePlan { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; margin-top: 18px; padding: 18px 20px; }
 .autoProveResult h3 { font-family: Georgia, serif; margin: 0 0 14px; }
 .autoProveResultHead { align-items: center; display: flex; gap: 12px; justify-content: space-between; }

@@ -128,11 +128,18 @@ def request_cancel(run_id: str) -> bool:
     return found
 
 
+def is_run_active(run_id: str) -> bool:
+    """True when this process still owns a live asyncio task for ``run_id``."""
+    task = _ACTIVE_TASKS.get(run_id)
+    return task is not None and not task.done()
+
+
 def _register_run(run_id: str) -> asyncio.Event:
-    event = _CANCEL_EVENTS.get(run_id)
-    if event is None:
-        event = asyncio.Event()
-        _CANCEL_EVENTS[run_id] = event
+    # Always start with a fresh cancel flag. Reusing a previously-set Event
+    # (e.g. cancel just landed, then Resume fires before unregister) would make
+    # the resumed run abort immediately and look like Resume "does nothing".
+    event = asyncio.Event()
+    _CANCEL_EVENTS[run_id] = event
     task = asyncio.current_task()
     if task is not None:
         _ACTIVE_TASKS[run_id] = task
@@ -181,6 +188,34 @@ def mark_run_cancelled(run_id: str, store: RunStore | None = None, *, owner_id: 
     return {
         "ok": False,
         "error": "Cancelled by user",
+        "run_id": run_id,
+        "run_dir": str(store.root) if store else None,
+        "passed": False,
+    }
+
+
+def mark_run_interrupted(run_id: str, store: RunStore | None = None, *, owner_id: str | None = None) -> dict[str, Any]:
+    """Mark a DB/disk run as failed when its worker is gone (process restart, crash)."""
+    message = "Research run interrupted (worker no longer running). Resume from checkpoint to continue."
+    store = store or open_run_store(run_id)
+    if store:
+        store.log(message)
+        store.write("STATUS.md", f"# Auto Prove Status\n\nFailed: {message}\n\n- Updated: {_now()}\n")
+        store.write(
+            "result.json",
+            json.dumps(
+                {"ok": False, "error": message, "run_id": run_id, "passed": False},
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
+    if owner_id:
+        from .prove_runs import touch_run
+
+        touch_run(run_id, owner_id, status="failed", phase="failed", error=message, current_tool="")
+    return {
+        "ok": False,
+        "error": message,
         "run_id": run_id,
         "run_dir": str(store.root) if store else None,
         "passed": False,

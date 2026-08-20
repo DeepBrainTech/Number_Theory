@@ -181,6 +181,16 @@ class CancelRegistryTests(unittest.IsolatedAsyncioTestCase):
         finally:
             _unregister_run(run_id)
 
+    async def test_register_run_clears_previous_cancel_flag(self) -> None:
+        run_id = "abc123def456"
+        _register_run(run_id)
+        self.assertTrue(request_cancel(run_id))
+        _register_run(run_id)
+        try:
+            _ensure_not_cancelled(run_id)
+        finally:
+            _unregister_run(run_id)
+
     async def test_mark_run_cancelled_writes_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch("app.auto_prove.settings") as settings:

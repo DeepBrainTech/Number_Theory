@@ -162,6 +162,26 @@ export function useAutoProveSession(options: {
     if (event.type === "snapshot") {
       const live = applySnapshot(event);
       if (!live) return;
+      if (live.status !== "running") {
+        setLiveById((current) => {
+          const next = { ...current };
+          delete next[live.runId];
+          return next;
+        });
+        setRuns((current) =>
+          current.map((run) => (
+            run.run_id === live.runId
+              ? {
+                  ...run,
+                  status: live.status,
+                  phase: live.phase || run.phase,
+                  current_tool: live.tool || "",
+                }
+              : run
+          )),
+        );
+        return;
+      }
       setLiveById((current) => ({ ...current, [live.runId]: { ...current[live.runId], ...live } }));
       return;
     }

@@ -189,7 +189,14 @@ export default function AutoProve({
 
   async function run(event: FormEvent, resume = false) {
     event.preventDefault();
-    if (!problem.trim() || running) return;
+    const problemText = problem.trim() || selected?.problem?.trim() || "";
+    if (running) return;
+    if (!problemText) {
+      onError?.(resume
+        ? "Open a failed or cancelled run before resuming from checkpoint."
+        : "Enter a problem to prove.");
+      return;
+    }
     if (!authenticated) {
       onError?.("Sign in to run Auto Prove. Proof runs are saved to your account.");
       return;
@@ -198,13 +205,18 @@ export default function AutoProve({
       onError?.("DEEPSEEK_API_KEY is required for Auto Prove.");
       return;
     }
+    if (resume && !activeRunId) {
+      onError?.("No research run selected to resume.");
+      return;
+    }
     const reuseRun = Boolean(
       activeRunId
       && (resume || selected?.status === "cancelled" || selected?.status === "failed"),
     );
+    if (!problem.trim() && problemText) setProblem(problemText);
     await onProve({
-      problem: problem.trim(),
-      guidance: guidance.trim(),
+      problem: problemText,
+      guidance: guidance.trim() || selected?.guidance || "",
       references,
       depth,
       formalize,
@@ -338,8 +350,18 @@ export default function AutoProve({
         <strong>Research run · {activeRunId}</strong>
         <p>Add a constraint, counterexample lead, or suggested direction. The next agent call reads it from the persistent run record.</p>
         <textarea disabled={!running} onChange={(e) => setResearchNote(e.target.value)} placeholder="For example: avoid the current analytic route; first test the conjecture for prime powers." value={researchNote} />
-        <button disabled={!running || !researchNote.trim()} onClick={() => void submitResearchNote()} type="button">Add research guidance</button>
-        {canResume && <button className="secondary" onClick={() => void run({ preventDefault() {} } as FormEvent, true)} type="button">Resume from checkpoint</button>}
+        <div className="autoProveResearchActions">
+          <button disabled={!running || !researchNote.trim()} onClick={() => void submitResearchNote()} type="button">Add research guidance</button>
+          {canResume && (
+            <button
+              className="secondary"
+              onClick={() => void run({ preventDefault() {} } as FormEvent, true)}
+              type="button"
+            >
+              Resume from checkpoint
+            </button>
+          )}
+        </div>
       </div>}
       {displayResult?.error && <p className="error">{displayResult.error}</p>}
       {displayResult?.proof && (
